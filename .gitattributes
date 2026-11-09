@@ -1,0 +1,85 @@
+# Acurix Edge - Git attributes (AEX-BOOT-001 R4, owner rules of 06/11/2026)
+#
+# Mutable text is stored with LF and checked out with LF (independent of core.autocrlf).
+# Historical/immutable trees are stored byte-for-byte (-text) so MANIFEST.sha256 stays
+# verifiable on any checkout. Binaries are never converted or text-diffed.
+# Later lines override earlier ones for the same attribute.
+
+# 1. Default: detected text is normalized to LF in the repository.
+*                text=auto
+
+# 2. Mutable code, configuration and textual documentation: controlled LF normalization.
+*.py             text eol=lf
+*.pyi            text eol=lf
+*.toml           text eol=lf
+*.json           text eol=lf
+*.cfg            text eol=lf
+*.ini            text eol=lf
+*.yml            text eol=lf
+*.yaml           text eol=lf
+*.sh             text eol=lf
+*.ps1            text eol=lf
+*.md             text eol=lf
+*.txt            text eol=lf
+*.csv            text eol=lf
+*.sha256         text eol=lf
+.gitignore       text eol=lf
+.gitattributes   text eol=lf
+
+# 3. Patches: textual (diffable) but never EOL-converted; context lines of blank
+#    source lines legitimately end in a space, so the whitespace check is disabled.
+*.patch          -text diff -whitespace
+*.diff           -text diff -whitespace
+
+# 4. Binaries: documents, images, databases, model weights and archives.
+*.pdf            binary
+*.PDF            binary
+*.jpg            binary
+*.JPG            binary
+*.jpeg           binary
+*.JPEG           binary
+*.png            binary
+*.PNG            binary
+*.db             binary
+*.db-wal         binary
+*.db-shm         binary
+*.sqlite         binary
+*.sqlite3        binary
+*.sqlite-wal     binary
+*.sqlite-shm     binary
+*.bak            binary
+*.invalid        binary
+*.pt             binary
+*.pth            binary
+*.onnx           binary
+*.engine         binary
+*.safetensors    binary
+*.ckpt           binary
+*.weights        binary
+*.bin            binary
+*.zip            binary
+
+# 5. Immutable/historical trees: stored exactly as delivered (no EOL conversion).
+#    CRLF there is original content (e.g. RFC 4180 CSV), not a whitespace defect.
+archive/**       -text whitespace=cr-at-eol
+docs/**          -text whitespace=cr-at-eol
+execution/**     -text whitespace=cr-at-eol
+resources/**     -text whitespace=cr-at-eol
+pdf/**           binary
+
+# 6. File-delimited whitespace exceptions (justified in AEX-BOOT-001 R4 report).
+#    Two trailing spaces are intentional Markdown hard line breaks; the historical
+#    files are manifest-covered and must not change bytes.
+README.md                                                    whitespace=-trailing-space
+#    Archived baseline v1.0.0 volumes end with a blank line as delivered (manifest-covered).
+archive/baseline_v1.0.0/00_MANUAL_MESTRE.md                  whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/02_ARQUITETURA_PLATAFORMA_SOFTWARE.md whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/03_HARDWARE_INSTALACAO_FIRMWARE.md   whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/04_VISAO_COMPUTACIONAL_DADOS.md      whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/05_SEGURANCA_PRIVACIDADE_FUNCIONAL.md whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/06_QUALIDADE_DEVOPS_OPERACOES.md     whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/07_APENDICES_CONTROLES_E_REFERENCIAS.md whitespace=cr-at-eol,-blank-at-eof
+archive/baseline_v1.0.0/01_PRODUTO_MERCADO_COMERCIAL.md      whitespace=cr-at-eol,-trailing-space
+docs/01-product/01_PRODUTO_MERCADO_COMERCIAL_v1.1.0.md       whitespace=cr-at-eol,-trailing-space
+execution/00_START_DESENVOLVIMENTO_HOJE.md                   whitespace=cr-at-eol,-trailing-space
+execution/03_HOST_PROFILE_NOTEBOOK_v1.2.1.md                 whitespace=cr-at-eol,-trailing-space

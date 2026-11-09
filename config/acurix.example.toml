@@ -1,0 +1,24 @@
+# Acurix Edge — example configuration (Foundation 0.1.0).
+# Do NOT place secrets here. Configuration version is independent of software/model versions.
+config_version = "0.1.0"
+site_id = "local-site"
+station_id = "station-01"
+
+[storage]
+data_dir = ".data"            # relative, git-ignored
+database_file = "acurix.db"
+min_free_disk_mb = 1024
+
+[api]
+bind_host = "127.0.0.1"       # loopback only in 0.1.0 (ARC-007)
+port = 8765
+
+[logging]
+level = "INFO"
+
+[inference]
+adapter = "noop"              # ADR-016: only authorized adapter in 0.1.0; always NO_DECISION
+
+[models]                      # ADR-016 default-deny; locked in 0.1.0 (non-empty/true is rejected)
+approved_models = []
+real_model_loading = false

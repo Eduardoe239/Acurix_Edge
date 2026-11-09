@@ -1,0 +1,92 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Local data, media and model artifacts
+.data/
+data/local/
+datasets/local/
+recordings/
+frames/
+models/weights/
+*.onnx
+*.pt
+*.pth
+*.engine
+*.ckpt
+*.safetensors
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secrets*
+
+# Reports with environment detail
+.reports/environment/*
+!.reports/README.md
+
+# Versioning policy (owner decision 03/11/2026, AEX-BOOT-001)
+# Byte-identical duplicates of archive/ (kept on disk, not versioned twice)
+acurix_edge_delivery_v1.0.0/
+pré documentação/
+# Archives, temporary files, local databases and backups
+*.zip
+*.tmp
+*.bak
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+# Photographs pending classification/authorization (root copies duplicate resources/brand/)
+/WhatsApp Image *.jpeg
+resources/brand/WhatsApp Image *.jpeg
+# Datasets / captured media never versioned without authorization and classification
+datasets/
+media/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ------------------------------------------------------------------
+# Regra do proprietário (09/11/2026): no repositório remoto entram
+# somente o sistema e o README.md. Documentação interna, configuração
+# de agentes, relatórios, marca e guardrails ficam apenas locais.
+# ------------------------------------------------------------------
+docs/
+pdf/
+archive/
+execution/
+.reports/
+resources/
+scripts/claude/
+scripts/validate_package.py
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+CHANGELOG.md
+VALIDATION_REPORT.md
+MANIFEST.sha256
+*.pdf
+*.docx
+*.xlsx
+*.pptx

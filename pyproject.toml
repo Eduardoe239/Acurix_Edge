@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acurix-edge"
+version = "0.1.0"
+description = "Acurix Edge — local-first visual inspection platform (Foundation 0.1.0, observation mode only)"
+requires-python = ">=3.12,<3.13"
+# Foundation 0.1.0 is intentionally standard-library only.
+# Any runtime dependency requires owner approval + license inventory (ADR-008/013/014).
+dependencies = []
+
+[project.scripts]
+acurix-edge = "acurix_edge.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
