@@ -12,6 +12,7 @@ import threading
 from dataclasses import asdict, dataclass
 
 from acurix_edge.contracts.decision import Decision, InspectionResult
+from acurix_edge.contracts.errors import ErrorCode
 from acurix_edge.contracts.events import EventEnvelope, ReviewStatus
 from acurix_edge.contracts.inference import InferenceResult
 from acurix_edge.domain.state_machine import StateMachine
@@ -39,6 +40,7 @@ class EventCounters:
     failed: int = 0
     inspection_duplicates: int = 0
     corrupt_records: int = 0
+    inspection_conflicts: int = 0  # same inspection_id re-submitted with different content (AEX-API-004)
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -50,6 +52,7 @@ class RecordResult:
     persisted: bool
     outcome: AppendOutcome | None
     error: str | None = None
+    code: ErrorCode | None = None  # AEX code when not persisted
 
 
 class EventService:
@@ -91,6 +94,20 @@ class EventService:
             "ctx": {"session_id": session_id, "inspection_id": inspection_id, "error": error}})
         self._state.enter_fault("EVENT_RECORD_CORRUPT")
 
+    def note_inspection_conflict(self, *, session_id: str, inspection_id: str, event_id: str) -> None:
+        """Same inspection_id, different request content: never re-inferred, never overwritten."""
+        with self._lock:
+            self._counters.inspection_conflicts += 1
+        log.error("inspection_id re-submitted with different content", extra={
+            "code": ErrorCode.API_004.value,
+            "ctx": {"session_id": session_id, "inspection_id": inspection_id, "event_id": event_id}})
+        try:
+            self._store.audit(actor_ref="system", action="IDEMPOTENCY_CONFLICT", target=inspection_id,
+                              detail={"code": ErrorCode.API_004.value, "event_id": event_id},
+                              correlation_id=session_id)
+        except PersistenceError:
+            log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+
     def build(
         self,
         *,
@@ -99,9 +116,13 @@ class EventService:
         session_id: str,
         captured_at_utc: str,
         capture_sequence: int,
+        latency_ms: float,
+        request_sha256: str,
         event_id: str | None = None,
     ) -> EventEnvelope:
         return EventEnvelope(
+            latency_ms=latency_ms,
+            request_sha256=request_sha256,
             event_id=event_id or EventEnvelope.new_id(),
             site_id=self._site_id,
             station_id=self._station_id,
@@ -127,6 +148,8 @@ class EventService:
                 "inference_error_code": inference.error_code,
                 "decision_detail": decision.detail,
                 "runtime": inference.runtime.to_dict(),
+                "inference_ms": inference.inference_ms,
+                "decision_ms": decision.latency_ms,
             },
         )
 
@@ -138,18 +161,20 @@ class EventService:
         except IdempotencyConflict as exc:
             with self._lock:
                 self._counters.failed += 1
-            log.error("event idempotency conflict", extra={"code": "EVENT_ID_CONFLICT", "ctx": {"event_id": envelope.event_id}})
-            return RecordResult(envelope.event_id, False, None, str(exc))
+            log.error("event idempotency conflict", extra={"code": ErrorCode.API_004.value,
+                                                           "ctx": {"event_id": envelope.event_id}})
+            return RecordResult(envelope.event_id, False, None, str(exc), ErrorCode.API_004)
         except Exception as exc:  # PersistenceError or any unexpected failure: never report as persisted
+            code = exc.code if isinstance(exc, PersistenceError) else ErrorCode.DB_001
             with self._lock:
                 self._counters.failed += 1
             log.critical(
                 "event persistence failed",
-                extra={"code": "PERSISTENCE_FAILURE", "ctx": {"event_id": envelope.event_id, "error": type(exc).__name__}},
+                extra={"code": code.value, "ctx": {"event_id": envelope.event_id, "error": type(exc).__name__}},
             )
-            self._state.enter_fault("PERSISTENCE_FAILURE")
+            self._state.enter_fault(f"PERSISTENCE_FAILURE {code}")
             detail = str(exc) if isinstance(exc, PersistenceError) else type(exc).__name__
-            return RecordResult(envelope.event_id, False, None, detail)
+            return RecordResult(envelope.event_id, False, None, detail, code)
         with self._lock:
             if outcome is AppendOutcome.INSERTED:
                 self._counters.persisted += 1

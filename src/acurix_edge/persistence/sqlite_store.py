@@ -14,18 +14,19 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import sqlite3
 import threading
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-from acurix_edge.contracts.errors import ContractError
+from acurix_edge.contracts.errors import ContractError, ErrorCode
 from acurix_edge.contracts.events import EventEnvelope, utc_now_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 1  # highest migration shipped in this release (migration 2 of Anexo 02A is PROPOSED, not here)
 MAX_PAGE = 1000
 EXPECTED_TABLES = frozenset({"inspection_event", "audit_entry"})
 EXPECTED_EVENT_COLUMNS = frozenset({
@@ -85,15 +86,38 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 
 
 class PersistenceError(RuntimeError):
-    """Storage unavailable, locked, full, corrupted or otherwise failing."""
+    """Storage unavailable, locked, full, corrupted or otherwise failing.
+
+    `code`: AEX-DB-001 (unavailable/locked/missing/corrupt) or AEX-DB-002 (disk full)."""
+
+    default_code = ErrorCode.DB_001
+
+    def __init__(self, message: str, code: ErrorCode | None = None) -> None:
+        super().__init__(message)
+        self.code = code or self.default_code
 
 
 class IdempotencyConflict(PersistenceError):
     """Same event_id re-submitted with a different payload."""
 
+    default_code = ErrorCode.API_004
+
 
 class CorruptRecordError(PersistenceError):
     """A stored event payload is undecodable, violates the contract or fails its SHA-256 (R4-03)."""
+
+
+_SQLITE_FULL = 13
+
+
+def classify_storage_error(exc: BaseException) -> ErrorCode:
+    """AEX-DB-002 when the failure is lack of space; AEX-DB-001 otherwise."""
+    if isinstance(exc, sqlite3.Error):
+        if (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF == _SQLITE_FULL or "disk is full" in str(exc):
+            return ErrorCode.DB_002
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return ErrorCode.DB_002
+    return ErrorCode.DB_001
 
 
 INVALID_BACKUP_SUFFIX = ".invalid"
@@ -104,7 +128,19 @@ class AppendOutcome(StrEnum):
     DUPLICATE = "DUPLICATE"
 
 
+def _validated_target(migrations: dict[int, tuple[str, ...]]) -> int:
+    versions = sorted(migrations)
+    if not versions or versions != list(range(1, len(versions) + 1)):
+        raise PersistenceError(f"migration registry must be contiguous from 1, got {versions}")
+    return versions[-1]
+
+
 class SqliteEventStore:
+    # Versioned migration registry. Migration N runs once, inside one transaction, after an
+    # automatic verified backup of any existing database. Shipped migrations are never edited:
+    # a schema change is a NEW entry (Anexo 02A migration 2 will be key 2 once approved).
+    MIGRATIONS: ClassVar[dict[int, tuple[str, ...]]] = _MIGRATIONS
+
     def __init__(self, db_path: Path, *, timeout_s: float = 5.0, read_only: bool = False) -> None:
         self._path = Path(db_path)
         self._lock = threading.RLock()
@@ -113,10 +149,11 @@ class SqliteEventStore:
         self.read_only = read_only
 
     def _err(self, prefix: str, exc: BaseException) -> PersistenceError:
-        msg = f"{prefix}: {type(exc).__name__}: {exc}"
+        code = classify_storage_error(exc)
+        msg = f"{code}: {prefix}: {type(exc).__name__}: {exc}"
         for p in (str(self._path), str(self._path.parent), self._path.as_posix(), self._path.parent.as_posix()):
             msg = msg.replace(p, "<data_dir>")
-        return PersistenceError(msg)
+        return PersistenceError(msg, code)
 
     # -- lifecycle -----------------------------------------------------------
     def open(self) -> None:
@@ -175,26 +212,31 @@ class SqliteEventStore:
             except sqlite3.Error as exc:
                 raise self._err("schema version unavailable", exc) from exc
 
+    @property
+    def target_version(self) -> int:
+        return _validated_target(self.MIGRATIONS)
+
     def _migrate(self) -> None:
         with self._lock:
             conn = self._c()
+            target = self.target_version
             current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if current > SCHEMA_VERSION:
-                raise PersistenceError(f"database schema {current} is newer than supported {SCHEMA_VERSION}")
-            if current == SCHEMA_VERSION:
+            if current > target:
+                raise PersistenceError(f"database schema {current} is newer than supported {target}")
+            if current == target:
                 return
             has_tables = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0] > 0
             if has_tables:
                 stamp = utc_now_iso().replace(":", "").replace("-", "").replace(".", "")
                 self.backup(self._path.with_name(f"{self._path.name}.pre-v{current + 1}-{stamp}.bak"))
-            for version in range(current + 1, SCHEMA_VERSION + 1):
+            for version in range(current + 1, target + 1):
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     # Re-read under the write lock: a concurrent 'init' may have migrated already.
                     if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= version:
                         conn.execute("ROLLBACK")
                         continue
-                    for stmt in _MIGRATIONS[version]:
+                    for stmt in self.MIGRATIONS[version]:
                         conn.execute(stmt)
                     conn.execute(f"PRAGMA user_version = {int(version)}")
                     conn.execute("COMMIT")
@@ -226,6 +268,49 @@ class SqliteEventStore:
                 raise PersistenceError(f"backup verification failed (quick_check); {marked}")
             return dest
 
+    @classmethod
+    def restore_backup(cls, backup: Path, dest: Path) -> Path:
+        """Restore a backup into a NEW database file and verify it.
+
+        Non-destructive by design: refuses an existing `dest` (never overwrites the live
+        database) and refuses backups marked `.invalid`. Swapping the restored file into
+        service is an operator action outside this package (runbook)."""
+        backup, dest = Path(backup), Path(dest)
+        if backup.name.endswith(INVALID_BACKUP_SUFFIX) or not backup.is_file():
+            raise PersistenceError(f"backup {backup.name} missing or marked invalid")
+        created = False  # quarantine may ONLY touch a file this call created (review R2-H1)
+        try:
+            src = sqlite3.connect(f"{backup.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                if src.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise PersistenceError(f"backup {backup.name} fails quick_check")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    # Exclusive create (no exists()/connect race): an existing file is never touched.
+                    with open(dest, "xb"):
+                        pass
+                except FileExistsError:
+                    raise PersistenceError("restore target already exists; refusing to overwrite") from None
+                created = True
+                target = sqlite3.connect(dest)
+                try:
+                    src.backup(target)
+                    verdict = target.execute("PRAGMA quick_check").fetchone()[0]
+                finally:
+                    target.close()
+            finally:
+                src.close()
+        except PersistenceError:
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            marked = cls._quarantine_backup(dest) if created else "target untouched"
+            raise PersistenceError(f"restore failed ({marked}): {type(exc).__name__}",
+                                   classify_storage_error(exc)) from exc
+        if verdict != "ok":
+            marked = cls._quarantine_backup(dest)
+            raise PersistenceError(f"restored copy fails quick_check; {marked}")
+        return dest
+
     @staticmethod
     def _quarantine_backup(dest: Path) -> str:
         if not dest.exists():
@@ -250,8 +335,8 @@ class SqliteEventStore:
                 conn.execute("SELECT 1").fetchone()
                 v = int(conn.execute("PRAGMA user_version").fetchone()[0])
                 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if v != SCHEMA_VERSION:
-                return False, f"schema {v} != {SCHEMA_VERSION}"
+            if v != self.target_version:
+                return False, f"schema {v} != {self.target_version}"
             missing = EXPECTED_TABLES - tables
             if missing:
                 return False, f"missing tables {sorted(missing)}"

@@ -11,7 +11,8 @@ Foundation 0.1.0 ships NO concrete rule: the first use case is NOT_FROZEN
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
@@ -59,6 +60,12 @@ class DecisionEngine:
         return self._rule
 
     def decide(self, inference: InferenceResult, ctx: DecisionContext) -> Decision:
+        """Every returned Decision carries the latency measured here (a rule cannot set its own)."""
+        start = time.perf_counter()
+        decision = self._decide(inference, ctx)
+        return replace(decision, latency_ms=(time.perf_counter() - start) * 1000.0)
+
+    def _decide(self, inference: InferenceResult, ctx: DecisionContext) -> Decision:
         if ctx.system_state not in RESULT_CAPABLE_STATES:
             return _no_decision(DecisionReason.SYSTEM_NOT_OBSERVING, f"system state {ctx.system_state}")
         if not ctx.health_ok:

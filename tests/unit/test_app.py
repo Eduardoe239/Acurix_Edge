@@ -11,6 +11,7 @@ from acurix_edge.health.service import ComponentStatus
 from tests.support import (
     FIXTURE_POLICY,
     FIXTURE_RUNTIME,
+    HEALTHY_HOST,
     FixtureApprovedRule,
     FixtureOkAdapter,
     TempDirTestCase,
@@ -34,6 +35,7 @@ class ApplicationTests(TempDirTestCase):
         cfg = kw.pop("config", AppConfig())
         # Test adapter subclasses are registered explicitly in the (test-only) policy seam.
         kw.setdefault("model_policy", fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
+        kw.setdefault("host_checks", HEALTHY_HOST)
         a = Application(cfg, self.tmp, **kw)
         a.boot()
         self.addCleanup(a.shutdown)
@@ -56,7 +58,7 @@ class ApplicationTests(TempDirTestCase):
         self.assertIs(a.state.state, SystemState.IDLE)
         a.start_session()
         self.assertIs(a.state.state, SystemState.DEGRADED)
-        self.assertEqual(a.status()["health"]["overall"], "DEGRADED")
+        self.assertEqual(a.status()["overall"], "DEGRADED")
 
     def test_noop_pipeline_persists_no_decision(self):
         a = self.app()
@@ -73,7 +75,8 @@ class ApplicationTests(TempDirTestCase):
         self.assertEqual(e.inference_status, "NO_MODEL")
         self.assertEqual(e.configuration, a.config.reference())
         self.assertEqual(a.events.counters().to_dict(), {"created": 3, "persisted": 3, "duplicates": 0, "failed": 0,
-                                                         "inspection_duplicates": 0, "corrupt_records": 0})
+                                                         "inspection_duplicates": 0, "corrupt_records": 0,
+                                                         "inspection_conflicts": 0})
 
     def test_no_pass_reachable_without_capture_even_with_fixture_model_and_rule(self):
         a = self.app(inference=FixtureOkAdapter(), rule=FixtureApprovedRule())
@@ -372,7 +375,7 @@ class ApplicationTests(TempDirTestCase):
             with self.subTest(policy=policy):
                 a, _ = self.observing_app(model_policy=policy)
                 self.assertIs(a.state.state, SystemState.DEGRADED)
-                model_health = next(c for c in a.status()["health"]["components"] if c["name"] == "model")
+                model_health = next(c for c in a.status()["components"] if c["component"] == "models")
                 self.assertEqual(model_health["status"], "DEGRADED")
                 self.assertIn("default-deny", model_health["detail"])
                 o = a.process(request())
@@ -413,7 +416,7 @@ class ApplicationTests(TempDirTestCase):
         cfg = AppConfig(storage=StorageConfig(data_dir="blocked"))
         a = self.app(config=cfg)
         self.assertIs(a.state.state, SystemState.FAULT)
-        self.assertEqual(a.status()["health"]["overall"], "FAULT")
+        self.assertEqual(a.status()["overall"], "FAULT")
         with self.assertRaises(SessionError):
             a.start_session()
 
@@ -451,11 +454,12 @@ class ApplicationTests(TempDirTestCase):
 
     def test_status_snapshot_contents(self):
         st = self.app().status()
-        self.assertEqual(st["software"]["version"], "0.1.0")
+        self.assertEqual(st["software_version"], "0.1.0")
         self.assertEqual(st["mode"], "OBSERVATION_ONLY")
         self.assertIsNone(st["inference"]["model"])
-        names = {c["name"] for c in st["health"]["components"]}
-        self.assertEqual(names, {"database", "storage", "model", "decision_rule", "camera"})
+        names = {c["component"] for c in st["components"]}
+        self.assertEqual(names, {"database", "storage", "models", "camera", "clock"})
+        self.assertEqual({c["component"] for c in st["resources"]}, {"memory", "cpu", "gpu", "queue", "decision_rule"})
         json.dumps(st)
 
     # -- CLI ------------------------------------------------------------------

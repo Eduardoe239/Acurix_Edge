@@ -8,15 +8,21 @@ status so that the decision layer returns NO_DECISION.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from acurix_edge import __version__
+from acurix_edge.contracts.common import require_keys, utc_now_iso, validate_non_empty_str, validate_utc
 from acurix_edge.contracts.errors import ContractError
 
-INFERENCE_SCHEMA_VERSION = "1.0"
+# 1.1 (AEX-CONTRACT-003): + completed_at_utc, software_version. Not persisted as a whole, so no 1.0 reader.
+INFERENCE_SCHEMA_VERSION = "1.1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Caller-supplied identifier: ASCII only, bounded, no whitespace/control characters (R4-02).
 _INSPECTION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -175,6 +181,29 @@ class InferenceRequest:
         _require(isinstance(self.input, InputDescriptor), "input must be InputDescriptor")
         self.input.validate()
 
+    def sha256(self) -> str:
+        """Request fingerprint for idempotency (EVT-001): inspection_id + input descriptor + pixel digest.
+
+        Any object exposing the buffer protocol (bytes, numpy arrays, ...) is hashed with its
+        format and shape. A frame that cannot be fingerprinted gets a RANDOM digest: a retry of
+        it never matches, so it becomes an idempotency conflict (NO_DECISION + AEX-API-004) and
+        a stored result is never replayed for content that could not be compared (review R1-M1)."""
+        frame = self.frame
+        if frame is None:
+            frame_digest = None
+        else:
+            try:
+                with memoryview(frame) as mv:
+                    h = hashlib.sha256(f"{mv.format}|{mv.shape}|".encode("ascii"))
+                    # Contiguous frames are hashed in place (no copy on the 8 GB host).
+                    h.update(mv.cast("B") if mv.c_contiguous else mv.tobytes())
+                frame_digest = h.hexdigest()
+            except Exception:  # any failure -> never comparable -> conflict, never a replay
+                frame_digest = "unfingerprintable:" + uuid.uuid4().hex
+        canonical = json.dumps({"inspection_id": self.inspection_id, "input": self.input.to_dict(),
+                                "frame_sha256": frame_digest}, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class InferenceResult:
@@ -186,10 +215,14 @@ class InferenceResult:
     predictions: tuple[Prediction, ...] = ()
     inference_ms: float = 0.0
     error_code: str | None = None
+    completed_at_utc: str = field(default_factory=utc_now_iso)
+    software_version: str = __version__
     schema_version: str = INFERENCE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require(self.schema_version == INFERENCE_SCHEMA_VERSION, f"unsupported schema_version {self.schema_version!r}")
+        validate_utc(self.completed_at_utc, "completed_at_utc")
+        validate_non_empty_str(self.software_version, "software_version")
         _require(isinstance(self.inspection_id, str) and bool(self.inspection_id), "inspection_id required")
         _require(isinstance(self.status, InferenceStatus), "status must be InferenceStatus")
         _require(isinstance(self.runtime, RuntimeRef), "runtime must be RuntimeRef")
@@ -222,22 +255,30 @@ class InferenceResult:
             "inference_ms": self.inference_ms,
             "status": self.status.value,
             "error_code": self.error_code,
+            "completed_at_utc": self.completed_at_utc,
+            "software_version": self.software_version,
         }
+
+    _KEYS = ("schema_version", "inspection_id", "model", "runtime", "input", "predictions", "inference_ms",
+             "status", "error_code", "completed_at_utc", "software_version")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "InferenceResult":
+        require_keys(data, cls._KEYS, "inference")
         try:
             status = InferenceStatus(data["status"])
             return cls(
-                schema_version=str(data["schema_version"]),
-                inspection_id=str(data["inspection_id"]),
-                model=ModelRef.from_dict(data["model"]) if data.get("model") else None,
+                schema_version=data["schema_version"],
+                inspection_id=data["inspection_id"],
+                model=ModelRef.from_dict(data["model"]) if data["model"] is not None else None,
                 runtime=RuntimeRef.from_dict(data["runtime"]),
                 input=InputDescriptor.from_dict(data["input"]),
-                predictions=tuple(Prediction.from_dict(p) for p in data.get("predictions", [])),
+                predictions=tuple(Prediction.from_dict(p) for p in data["predictions"]),
                 inference_ms=data["inference_ms"],
                 status=status,
-                error_code=data.get("error_code"),
+                error_code=data["error_code"],
+                completed_at_utc=data["completed_at_utc"],
+                software_version=data["software_version"],
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, ContractError):

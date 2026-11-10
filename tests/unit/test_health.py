@@ -1,7 +1,8 @@
 import unittest
 from pathlib import Path
 
-from acurix_edge.health.service import ComponentStatus as C, HealthService, host_memory, storage_check
+from acurix_edge.health.checks import storage_check
+from acurix_edge.health.service import ComponentStatus as C, HealthService, host_memory
 
 
 def svc(*specs):

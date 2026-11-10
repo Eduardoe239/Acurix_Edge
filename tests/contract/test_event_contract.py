@@ -17,7 +17,7 @@ def make(**kw) -> EventEnvelope:
         event_id=EventEnvelope.new_id(), site_id="site", station_id="st", session_id="s", inspection_id="insp-1",
         captured_at_utc="2026-11-03T12:00:00.000Z", capture_sequence=1, result=InspectionResult.REVIEW,
         reason="X", inference_status="NO_MODEL", model=None, configuration=CFG, software_version="0.1.0",
-        review_status=ReviewStatus.PENDING,
+        review_status=ReviewStatus.PENDING, latency_ms=1.5, request_sha256="c" * 64,
     )
     base.update(kw)
     return EventEnvelope(**base)

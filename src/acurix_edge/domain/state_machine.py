@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from acurix_edge.contracts.errors import ErrorCode
 from acurix_edge.contracts.events import utc_now_iso
 
 log = logging.getLogger("acurix_edge.state")
@@ -45,9 +46,15 @@ FAULT_RELEASE_TARGETS = frozenset({S.IDLE})
 RESULT_CAPABLE_STATES = frozenset({S.OBSERVING})
 
 
+def rejection_code(source: SystemState) -> ErrorCode:
+    """AEX-STATE-002 while FAULT is latched; AEX-STATE-001 for any other forbidden transition."""
+    return ErrorCode.STATE_002 if source is SystemState.FAULT else ErrorCode.STATE_001
+
+
 class InvalidTransition(RuntimeError):
     def __init__(self, source: SystemState, target: SystemState, reason: str) -> None:
-        super().__init__(f"transition {source} -> {target} not allowed ({reason})")
+        self.code = rejection_code(source)
+        super().__init__(f"{self.code}: transition {source} -> {target} not allowed ({reason})")
         self.source = source
         self.target = target
 
@@ -132,7 +139,8 @@ class StateMachine:
         if not accepted:
             log.warning(
                 "state transition rejected",
-                extra={"code": "STATE_TRANSITION_REJECTED", "ctx": {"source": source, "target": target, "reason": reason}},
+                extra={"code": rejection_code(source).value,
+                       "ctx": {"source": source, "target": target, "reason": reason}},
             )
             raise InvalidTransition(source, target, reason)
         log.info(

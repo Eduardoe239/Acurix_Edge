@@ -1,8 +1,15 @@
-"""Inspection event envelope (Vol.02 §6.2, schema 1.0).
+"""Inspection event envelope (Vol.02 §6.2, schema 1.1; 1.0 is read-only).
 
 Rules: event_id is an immutable canonical UUID; timestamps are UTC ISO-8601
 with millisecond precision and 'Z'; result is the versioned InspectionResult
 enum; confidence is a technical value in [0, 1], not a calibrated probability.
+
+Schema 1.1 (AEX-CONTRACT-003) adds, both mandatory:
+- `latency_ms`: measured processing latency (inference + decision);
+- `request_sha256`: digest of the inspection request, used to detect the same
+  inspection_id re-submitted with different content (idempotency conflict).
+Events persisted as 1.0 keep decoding unchanged (their stored bytes and hash are
+never rewritten); new events are always written as 1.1.
 
 Defense in depth: a conclusive result (PASS/DEFECT) is rejected at this layer
 too unless it carries a valid model reference, the decision rule id/version and
@@ -15,19 +22,28 @@ import copy
 import hashlib
 import json
 import math
-import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
+from acurix_edge.contracts.common import (
+    utc_now_iso,
+    validate_canonical_uuid,
+    validate_latency_ms,
+    validate_sha256,
+    validate_utc,
+)
 from acurix_edge.contracts.decision import InspectionResult
 from acurix_edge.contracts.errors import ContractError
 from acurix_edge.contracts.inference import InferenceStatus, ModelRef
 
-EVENT_SCHEMA_VERSION = "1.0"
-_UTC_MS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z")  # ASCII digits only
+__all__ = ["EVENT_SCHEMA_VERSION", "SUPPORTED_EVENT_SCHEMAS", "EventEnvelope", "ReviewStatus", "utc_now_iso",
+           "validate_utc"]
+
+EVENT_SCHEMA_VERSION = "1.1"
+LEGACY_EVENT_SCHEMA = "1.0"
+SUPPORTED_EVENT_SCHEMAS = frozenset({LEGACY_EVENT_SCHEMA, EVENT_SCHEMA_VERSION})
 
 
 class ReviewStatus(StrEnum):
@@ -36,26 +52,7 @@ class ReviewStatus(StrEnum):
     REVIEWED = "REVIEWED"
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def validate_utc(ts: Any) -> None:
-    if not isinstance(ts, str) or not _UTC_MS_RE.fullmatch(ts):
-        raise ContractError("captured_at_utc must be UTC 'YYYY-MM-DDTHH:MM:SS.mmmZ'")
-    try:
-        datetime.fromisoformat(ts[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ContractError(f"invalid captured_at_utc {ts!r}") from exc
-
-
-def _validate_canonical_uuid(value: Any, name: str) -> None:
-    try:
-        canonical = str(uuid.UUID(value))
-    except (ValueError, AttributeError, TypeError) as exc:
-        raise ContractError(f"{name} must be a UUID") from exc
-    if value != canonical:
-        raise ContractError(f"{name} must be a canonical lowercase UUID")
+_validate_canonical_uuid = validate_canonical_uuid
 
 
 def _is_str(v: Any) -> bool:
@@ -84,10 +81,19 @@ class EventEnvelope:
     software_version: str = ""
     schema_version: str = EVENT_SCHEMA_VERSION
     extra: dict[str, Any] = field(default_factory=dict)
+    latency_ms: float | None = None
+    request_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != EVENT_SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_EVENT_SCHEMAS:
             raise ContractError(f"unsupported event schema_version {self.schema_version!r}")
+        if self.schema_version == EVENT_SCHEMA_VERSION:
+            if self.latency_ms is None or self.request_sha256 is None:
+                raise ContractError("event schema 1.1 requires latency_ms and request_sha256")
+            validate_latency_ms(self.latency_ms)
+            validate_sha256(self.request_sha256, "request_sha256")
+        elif self.latency_ms is not None or self.request_sha256 is not None:
+            raise ContractError("event schema 1.0 does not carry latency_ms/request_sha256")
         _validate_canonical_uuid(self.event_id, "event_id")
         for name in ("site_id", "station_id", "session_id", "inspection_id", "reason", "software_version", "inference_status"):
             if not _is_str(getattr(self, name)):
@@ -140,6 +146,13 @@ class EventEnvelope:
         return str(uuid.uuid4())
 
     def to_dict(self) -> dict[str, Any]:
+        d = self._base_dict()
+        if self.schema_version == EVENT_SCHEMA_VERSION:
+            d["latency_ms"] = self.latency_ms
+            d["request_sha256"] = self.request_sha256
+        return d
+
+    def _base_dict(self) -> dict[str, Any]:
         return copy.deepcopy({
             "schema_version": self.schema_version,
             "event_id": self.event_id,
@@ -171,8 +184,16 @@ class EventEnvelope:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EventEnvelope":
+        if not isinstance(data, dict):
+            raise ContractError("event payload must be an object")
+        if data.get("schema_version") == EVENT_SCHEMA_VERSION:
+            for key in ("latency_ms", "request_sha256"):
+                if key not in data:
+                    raise ContractError(f"event payload missing fields ['{key}']")
         try:
             return cls(
+                latency_ms=data.get("latency_ms"),
+                request_sha256=data.get("request_sha256"),
                 schema_version=data["schema_version"],
                 event_id=data["event_id"],
                 site_id=data["site_id"],

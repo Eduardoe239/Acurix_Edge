@@ -4,6 +4,7 @@
   python -m acurix_edge status [--config FILE] [--base-dir DIR]   read-only health/status JSON
   python -m acurix_edge reset-fault --reason TEXT [--actor ID] [--config FILE] [--base-dir DIR]
 
+Output is the OpenAPI `Status` document (plus extra fields: overall, resources, ...).
 `status` opens the database read-only: it never creates, migrates or writes.
 A FAULT is latched across restarts (R4-01); only `reset-fault` (audited) clears it.
 Exit codes (status): 0 overall OK, 1 DEGRADED/UNKNOWN, 2 FAULT or configuration error.
@@ -61,10 +62,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "RESET_REFUSED", "detail": reset_error}), file=sys.stderr)
             return 2
         return 0 if snapshot["state"] == "IDLE" else 2
-    components = {c["name"]: c["status"] for c in (snapshot.get("health") or {}).get("components", [])}
+    components = {c["component"]: c["status"] for c in snapshot.get("components", [])}
     if args.command == "init":
         return 0 if components.get("database") == "OK" else 2
-    overall = (snapshot.get("health") or {}).get("overall")
+    overall = snapshot.get("overall")
     if snapshot["state"] == "FAULT" or overall == "FAULT":
         return 2
     return 0 if overall == "OK" else 1

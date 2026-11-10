@@ -85,6 +85,20 @@ class FixtureApprovedRule:
         return Decision(self._result, DecisionReason.RULE_APPLIED, self.rule_id, self.rule_version)
 
 
+def _fixture_host(status_name: str):
+    from acurix_edge.health.service import ComponentStatus
+
+    status = ComponentStatus(status_name)
+    return lambda: (status, "fixture host probe")
+
+
+# Host probes for tests that need OBSERVING independent of the real machine (this dev host often
+# has < 1.5 GB free RAM, which correctly yields DEGRADED under ADR-014). Real probes are tested
+# separately in tests/unit/test_health_005.py.
+HEALTHY_HOST = {"clock": _fixture_host("OK"), "memory": _fixture_host("OK"), "cpu": _fixture_host("OK"),
+                "gpu": _fixture_host("DISABLED")}
+
+
 class TempDirTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)

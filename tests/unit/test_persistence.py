@@ -21,7 +21,7 @@ def env(seq: int = 1, event_id: str | None = None, result=InspectionResult.NO_DE
         inspection_id=inspection_id or ("insp-" + EventEnvelope.new_id()),
         captured_at_utc=f"2026-11-03T12:00:{seq:02d}.000Z", capture_sequence=seq, result=result,
         reason="NO_APPROVED_RULE", inference_status="NO_MODEL", model=None, configuration=CFG, software_version="0.1.0",
-        review_status=ReviewStatus.NOT_REQUIRED,
+        review_status=ReviewStatus.NOT_REQUIRED, latency_ms=0.5, request_sha256="d" * 64,
     )
 
 

@@ -24,6 +24,7 @@ from acurix_edge.persistence.sqlite_store import CorruptRecordError, Persistence
 from tests.support import (
     FIXTURE_MODEL,
     FIXTURE_POLICY,
+    HEALTHY_HOST,
     FixtureApprovedRule,
     FixtureOkAdapter,
     TempDirTestCase,
@@ -42,6 +43,7 @@ class AppCase(TempDirTestCase):
     def app(self, **kw) -> Application:
         cfg = kw.pop("config", AppConfig())
         kw.setdefault("model_policy", fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
+        kw.setdefault("host_checks", HEALTHY_HOST)
         a = Application(cfg, self.tmp, **kw)
         a.boot()
         self.addCleanup(a.shutdown)

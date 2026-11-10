@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from acurix_edge import __version__
+from acurix_edge.contracts.common import (
+    require_keys,
+    utc_now_iso,
+    validate_latency_ms,
+    validate_non_empty_str,
+    validate_utc,
+)
 from acurix_edge.contracts.errors import ContractError
 
-DECISION_SCHEMA_VERSION = "1.0"
+# 1.1 (AEX-CONTRACT-003): + decided_at_utc, latency_ms, software_version.
+DECISION_SCHEMA_VERSION = "1.1"
 
 
 class InspectionResult(StrEnum):
@@ -38,11 +47,20 @@ class Decision:
     class_id: str | None = None
     confidence: float | None = None
     detail: str | None = None
+    decided_at_utc: str = field(default_factory=utc_now_iso)
+    # Measured by the DecisionEngine (it overwrites whatever a rule supplies); None only before
+    # leaving the engine. The event contract requires the measured total latency.
+    latency_ms: float | None = None
+    software_version: str = __version__
     schema_version: str = DECISION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != DECISION_SCHEMA_VERSION:
             raise ContractError(f"unsupported decision schema_version {self.schema_version!r}")
+        validate_utc(self.decided_at_utc, "decided_at_utc")
+        if self.latency_ms is not None:
+            validate_latency_ms(self.latency_ms)
+        validate_non_empty_str(self.software_version, "software_version")
         if not isinstance(self.result, InspectionResult) or not isinstance(self.reason, DecisionReason):
             raise ContractError("result/reason must be versioned enums")
         for name in ("rule_id", "rule_version", "class_id", "detail"):
@@ -70,4 +88,32 @@ class Decision:
             "class_id": self.class_id,
             "confidence": self.confidence,
             "detail": self.detail,
+            "decided_at_utc": self.decided_at_utc,
+            "latency_ms": self.latency_ms,
+            "software_version": self.software_version,
         }
+
+    _KEYS = ("schema_version", "result", "reason", "rule_id", "rule_version", "class_id", "confidence", "detail",
+             "decided_at_utc", "latency_ms", "software_version")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Decision":
+        require_keys(data, cls._KEYS, "decision")
+        try:
+            return cls(
+                schema_version=data["schema_version"],
+                result=InspectionResult(data["result"]),
+                reason=DecisionReason(data["reason"]),
+                rule_id=data["rule_id"],
+                rule_version=data["rule_version"],
+                class_id=data["class_id"],
+                confidence=data["confidence"],
+                detail=data["detail"],
+                decided_at_utc=data["decided_at_utc"],
+                latency_ms=data["latency_ms"],
+                software_version=data["software_version"],
+            )
+        except ContractError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ContractError(f"invalid decision payload: {exc}") from exc

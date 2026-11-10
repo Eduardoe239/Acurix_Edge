@@ -17,7 +17,7 @@ from acurix_edge.contracts.inference import (
 from tests.support import FIXTURE_MODEL, FIXTURE_RUNTIME, FixtureOkAdapter, ok_result, request
 
 REQUIRED_KEYS = {"schema_version", "inspection_id", "model", "runtime", "input", "predictions",
-                 "inference_ms", "status", "error_code"}
+                 "inference_ms", "status", "error_code", "completed_at_utc", "software_version"}
 
 
 class InferenceContractTests(unittest.TestCase):
