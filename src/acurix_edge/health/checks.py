@@ -5,14 +5,15 @@ Thresholds used here and their source:
   light work). Not a guarantee of execution, a conservative guardrail.
 - Disk: free < storage.min_free_disk_mb (configuration) -> DEGRADED + AEX-DB-002. An actual
   write failure for lack of space is handled by persistence (AEX-DB-002 + FAULT).
-- Clock (owner decision 10/11/2026, code AEX-CLK-001 "Relógio não confiável", internal):
-  * wall clock earlier than the last persisted event (`persisted_at_utc`, strict comparison,
-    no tolerance) -> FAULT: the clock went back in time and new records would be out of order;
-  * any other clock problem -> DEGRADED (blocks OBSERVING): earlier than CLOCK_FLOOR_UTC; earlier
-    than the highest wall time already observed by this check minus CLOCK_BACKWARD_TOLERANCE_S
-    (stays DEGRADED until the clock catches up, not only on the check that saw the jump);
-    unreadable clock or last-event time. The clock is registered as CRITICAL so that the
-    FAULT case latches the system; the check itself never raises.
+- Clock (owner decisions 10/11/2026, code AEX-CLK-001 "Relógio não confiável", internal).
+  Tolerance T = configuration `clock.backward_tolerance_s` (schema-validated, default 2.0 s):
+  * wall clock behind the last persisted event (`persisted_at_utc`) by at most T -> tolerated:
+    status OK (state unchanged) with code AEX-CLK-001 and a WARNING log;
+  * behind it by more than T -> FAULT (latched): the clock went back in time;
+  * any other clock problem -> DEGRADED (blocks OBSERVING): earlier than CLOCK_FLOOR_UTC; more
+    than T behind the highest wall time already observed by this check (stays DEGRADED until
+    the clock catches up); unreadable clock or last-event time. The clock is registered as
+    CRITICAL so that the FAULT case latches the system; the check itself never raises.
 - CPU: informational (no approved load threshold); unreadable -> UNKNOWN.
 - GPU: optional. No `nvidia-smi` on PATH -> DISABLED (CPU fallback is mandatory); probe
   error/timeout -> DEGRADED. Result cached CACHE_S seconds (subprocess is not run per frame).
@@ -21,21 +22,23 @@ Thresholds used here and their source:
 from __future__ import annotations
 
 import ctypes
+import logging
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from acurix_edge.contracts.errors import ErrorCode
 from acurix_edge.health.service import CheckResult, ComponentStatus, host_memory
 
+log = logging.getLogger("acurix_edge.health.clock")
+
 ADR014_MIN_FREE_RAM_MB = 1536
 CLOCK_FLOOR_UTC = datetime(2026, 11, 1, tzinfo=timezone.utc)
-CLOCK_BACKWARD_TOLERANCE_S = 2.0
 GPU_CACHE_S = 30.0
 GPU_TIMEOUT_S = 3.0
 
@@ -71,8 +74,16 @@ def _parse_utc(ts: str) -> datetime:
 
 
 class ClockCheck:
-    def __init__(self, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    """`backward_tolerance_s` is mandatory: it comes from validated configuration
+    (`clock.backward_tolerance_s`), never from a constant in code."""
+
+    def __init__(self, *, backward_tolerance_s: float,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  last_event_utc: Callable[[], str | None] = lambda: None) -> None:
+        if isinstance(backward_tolerance_s, bool) or not isinstance(backward_tolerance_s, (int, float)) \
+                or not 0 <= backward_tolerance_s < float("inf"):
+            raise ValueError("backward_tolerance_s must be a finite number >= 0")
+        self._tol = timedelta(seconds=backward_tolerance_s)
         self._now, self._last_event = now, last_event_utc
         self._high_water: datetime | None = None
         self._lock = threading.Lock()
@@ -90,10 +101,12 @@ class ClockCheck:
         except Exception as exc:
             return (ComponentStatus.DEGRADED, f"last event time unreadable: {type(exc).__name__}",
                     ErrorCode.CLK_001)
-        if last_event is not None and wall < last_event:
+        tol_s = self._tol.total_seconds()
+        behind_event = (last_event - wall) if last_event is not None else None
+        if behind_event is not None and behind_event > self._tol:
             return (ComponentStatus.FAULT,
-                    f"system clock {wall.isoformat()} earlier than last persisted event {last_raw} (went back in time)",
-                    ErrorCode.CLK_001)
+                    f"system clock {wall.isoformat()} is {behind_event.total_seconds():.3f} s earlier than the last "
+                    f"persisted event {last_raw} (tolerance {tol_s:g} s; went back in time)", ErrorCode.CLK_001)
         with self._lock:
             high = self._high_water
             if high is None or wall > high:
@@ -101,10 +114,17 @@ class ClockCheck:
         if wall < CLOCK_FLOOR_UTC:
             return (ComponentStatus.DEGRADED, f"system clock {wall.isoformat()} earlier than {CLOCK_FLOOR_UTC.date()}",
                     ErrorCode.CLK_001)
-        if high is not None and (high - wall).total_seconds() > CLOCK_BACKWARD_TOLERANCE_S:
+        if high is not None and high - wall > self._tol:
             return (ComponentStatus.DEGRADED,
-                    f"wall clock {(high - wall).total_seconds():.1f} s behind a time already observed",
-                    ErrorCode.CLK_001)
+                    f"wall clock {(high - wall).total_seconds():.3f} s behind a time already observed "
+                    f"(tolerance {tol_s:g} s)", ErrorCode.CLK_001)
+        if behind_event is not None and behind_event > timedelta(0):
+            detail = (f"clock {behind_event.total_seconds():.3f} s behind the last persisted event "
+                      f"{last_raw}; within tolerance {tol_s:g} s (tolerated, state unchanged)")
+            log.warning("clock behind last persisted event within tolerance",
+                        extra={"code": ErrorCode.CLK_001.value,
+                               "ctx": {"behind_s": round(behind_event.total_seconds(), 3), "tolerance_s": tol_s}})
+            return ComponentStatus.OK, detail, ErrorCode.CLK_001
         return ComponentStatus.OK, "UTC clock plausible"
 
 

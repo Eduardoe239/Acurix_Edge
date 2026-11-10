@@ -99,6 +99,19 @@ HEALTHY_HOST = {"clock": _fixture_host("OK"), "memory": _fixture_host("OK"), "cp
                 "gpu": _fixture_host("DISABLED")}
 
 
+def tamper_event_row(conn, sql: str, params: tuple = ()) -> None:
+    """Simulates EXTERNAL corruption/tampering of inspection_event (R4-03 tests). Since migration 3
+    the database aborts any UPDATE; someone with raw write access to the file can still drop the
+    trigger, which is exactly what this does before re-creating it."""
+    from acurix_edge.persistence.sqlite_store import _MIGRATIONS, IMMUTABILITY_TRIGGER
+
+    conn.execute(f"DROP TRIGGER IF EXISTS {IMMUTABILITY_TRIGGER}")
+    try:
+        conn.execute(sql, params)
+    finally:
+        conn.execute(_MIGRATIONS[3][0])
+
+
 class TempDirTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)

@@ -33,6 +33,7 @@ from tests.support import (
 )
 
 OPENAPI = Path(__file__).resolve().parents[2] / "docs" / "02-architecture" / "api" / "openapi-v1.yaml"
+TOL = AppConfig().clock.backward_tolerance_s  # 2.0 s by configuration default (owner, Ordem 2.1)
 
 
 def fixed(status, detail="injected", code=None):
@@ -147,11 +148,11 @@ class InjectedFailureTests(HealthyAppCase):
 
 class ProbeUnitTests(unittest.TestCase):
     def test_clock(self):
-        # Clock problems other than "earlier than the last event" are DEGRADED + AEX-CLK-001.
-        before_floor = ClockCheck(now=lambda: CLOCK_FLOOR_UTC - timedelta(days=1))
+        # Clock problems other than "behind the last event" are DEGRADED + AEX-CLK-001.
+        before_floor = ClockCheck(backward_tolerance_s=TOL, now=lambda: CLOCK_FLOOR_UTC - timedelta(days=1))
         self.assertEqual(before_floor()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
         t = [datetime(2026, 11, 10, tzinfo=timezone.utc)]
-        clock = ClockCheck(now=lambda: t[0])
+        clock = ClockCheck(backward_tolerance_s=TOL, now=lambda: t[0])
         self.assertEqual(clock(), (C.OK, "UTC clock plausible"))
         t[0] -= timedelta(seconds=30)
         self.assertEqual(clock()[0::2], (C.DEGRADED, ErrorCode.CLK_001))  # wall clock jumped back
@@ -164,19 +165,42 @@ class ProbeUnitTests(unittest.TestCase):
         def broken():
             raise OSError("rtc")
 
-        self.assertEqual(ClockCheck(now=broken)()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
-        naive = ClockCheck(now=lambda: datetime(2026, 11, 10))
+        self.assertEqual(ClockCheck(backward_tolerance_s=TOL, now=broken)()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
+        naive = ClockCheck(backward_tolerance_s=TOL, now=lambda: datetime(2026, 11, 10))
         self.assertEqual(naive()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
-        bad_last = ClockCheck(now=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc), last_event_utc=lambda: "x")
+        bad_last = ClockCheck(backward_tolerance_s=TOL, now=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc),
+                              last_event_utc=lambda: "x")
         self.assertEqual(bad_last()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
 
-    def test_clock_before_last_event_is_fault(self):
-        now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
-        last = "2026-11-10T12:00:00.001Z"  # strict: 1 ms in the future of the clock is already FAULT
-        self.assertEqual(ClockCheck(now=lambda: now, last_event_utc=lambda: last)()[0::2],
-                         (C.FAULT, ErrorCode.CLK_001))
-        same = "2026-11-10T12:00:00.000Z"
-        self.assertIs(ClockCheck(now=lambda: now, last_event_utc=lambda: same)()[0], C.OK)
+    def test_clock_tolerance_boundaries_vs_last_event(self):
+        # Owner decision (Ordem 2.1): up to 2 s behind the last event -> tolerated + logged
+        # (OK, state unchanged, code AEX-CLK-001); more than 2 s -> FAULT.
+        last = "2026-11-10T12:00:02.000Z"
+        base = datetime(2026, 11, 10, 12, 0, 2, tzinfo=timezone.utc)
+        for behind_s, status in ((1.9, C.OK), (2.0, C.OK), (2.1, C.FAULT)):
+            with self.subTest(behind_s=behind_s):
+                now = base - timedelta(seconds=behind_s)
+                check = ClockCheck(backward_tolerance_s=TOL, now=lambda now=now: now, last_event_utc=lambda: last)
+                if status is C.OK:
+                    with self.assertLogs("acurix_edge.health.clock", "WARNING") as cm:
+                        result = check()
+                    self.assertEqual(cm.records[0].code, "AEX-CLK-001")
+                    self.assertIn("tolerated", result[1])
+                else:
+                    result = check()
+                self.assertEqual((result[0], result[2]), (status, ErrorCode.CLK_001))
+        same = ClockCheck(backward_tolerance_s=TOL, now=lambda: base, last_event_utc=lambda: last)
+        self.assertEqual(same(), (C.OK, "UTC clock plausible"))  # not behind: no code, no log
+        zero = ClockCheck(backward_tolerance_s=0, now=lambda: base - timedelta(milliseconds=1),
+                          last_event_utc=lambda: last)
+        self.assertIs(zero()[0], C.FAULT)  # the tolerance really comes from the parameter
+
+    def test_clock_tolerance_is_mandatory_and_validated(self):
+        with self.assertRaises(TypeError):
+            ClockCheck()  # no hidden default in code
+        for bad in (-1, float("nan"), float("inf"), True, "2"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ClockCheck(backward_tolerance_s=bad)
 
     def test_memory_unknown_when_unmeasurable(self):
         self.assertIs(memory_check(lambda: None)()[0], C.UNKNOWN)
@@ -210,7 +234,7 @@ class ProbeUnitTests(unittest.TestCase):
 
     def test_real_probes_return_valid_results(self):
         # Smoke test on this host; only checks shape (values vary by session).
-        for probe in (memory_check(), CpuCheck(), GpuCheck(), ClockCheck()):
+        for probe in (memory_check(), CpuCheck(), GpuCheck(), ClockCheck(backward_tolerance_s=TOL)):
             with self.subTest(probe=type(probe).__name__):
                 result = probe()
                 self.assertIsInstance(result[0], C)

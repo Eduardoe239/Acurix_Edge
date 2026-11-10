@@ -19,6 +19,9 @@ level = "INFO"
 [inference]
 adapter = "noop"              # ADR-016: only authorized adapter in 0.1.0; always NO_DECISION
 
+[clock]                       # AEX-CLK-001 (owner decision 10/11/2026)
+backward_tolerance_s = 2.0    # 0..10 s; clock behind last event within this = logged, beyond = FAULT
+
 [models]                      # ADR-016 default-deny; locked in 0.1.0 (non-empty/true is rejected)
 approved_models = []
 real_model_loading = false

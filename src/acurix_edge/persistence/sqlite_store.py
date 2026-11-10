@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from enum import StrEnum
@@ -26,7 +28,7 @@ from typing import Any, ClassVar
 from acurix_edge.contracts.errors import ContractError, ErrorCode
 from acurix_edge.contracts.events import EventEnvelope, utc_now_iso
 
-SCHEMA_VERSION = 2  # highest migration shipped (migration 2 = Anexo 02A §2, APPROVED 10/11/2026)
+SCHEMA_VERSION = 3  # 2 = Anexo 02A §2 (APPROVED 10/11/2026); 3 = immutability trigger (owner, Ordem 2.1)
 MAX_PAGE = 1000
 EXPECTED_TABLES = frozenset({
     "inspection_event", "audit_entry",
@@ -184,7 +186,26 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE audit_entry ADD COLUMN prev_sha256 TEXT",
         "ALTER TABLE audit_entry ADD COLUMN entry_sha256 TEXT",
     ),
+    # Migration 3 — owner decision 10/11/2026 (Ordem 2.1): inspection_event rows are immutable.
+    # UPDATE is aborted by the database itself; DELETE is deliberately NOT blocked (future
+    # retention purge stays controlled and audited by code). To be documented in Anexo 02A.
+    3: (
+        """CREATE TRIGGER trg_inspection_event_no_update BEFORE UPDATE ON inspection_event
+BEGIN
+  SELECT RAISE(ABORT, 'AEX-DB: inspection_event is immutable; UPDATE forbidden (migration 3). Record reviews in table review.');
+END""",
+    ),
 }
+IMMUTABILITY_TRIGGER = "trg_inspection_event_no_update"
+# Known limit (review R3 M1): `INSERT OR REPLACE` / `REPLACE INTO` is DELETE+INSERT for SQLite and
+# does not fire a BEFORE UPDATE trigger. Product code never uses it on inspection_event; a static
+# test (tests/unit/test_migration_003.py) forbids it in src/. UPSERT `ON CONFLICT DO UPDATE` and
+# `UPDATE OR REPLACE` DO fire the trigger. Closing REPLACE at database level requires a DELETE
+# guard, which the owner deliberately left open for the future retention purge.
+
+
+def _norm_sql(sql: str | None) -> str:
+    return " ".join((sql or "").split())
 
 
 def audit_entry_sha256(prev_sha256: str, occurred_at_utc: str, actor_ref: str, action: str, target: str,
@@ -389,27 +410,42 @@ class SqliteEventStore:
                         conn.execute("ROLLBACK")
                     raise
 
+    # -- backup / restore ------------------------------------------------------
+    # Safety rules (R4-06, review R2-H1, Ordem 2.1 B1-B6):
+    # - the destination is created EXCLUSIVELY; an existing file is never opened or overwritten;
+    # - quarantine only ever touches the file this call created, identified by (st_dev, st_ino);
+    # - quarantine runs on ANY exception after creation, including KeyboardInterrupt/MemoryError;
+    # - the quarantine name is unique (UTC timestamp + counter): an older `.invalid` is never replaced;
+    # - leftover journal side files of the destination are refused before, and moved with it after.
+
     def backup(self, dest: Path) -> Path:
-        """Write and verify a backup. A copy that fails quick_check (or is left partial by an
-        error) is renamed to `<name>.invalid` so it can never be mistaken for a valid backup
-        (R4-06). Nothing in this package restores backups automatically."""
+        """Write and verify a backup into a NEW file. A copy that fails quick_check (or is left
+        partial by any error) is quarantined as `<name>.<UTC>.invalid` so it can never be mistaken
+        for a valid backup. Nothing in this package restores backups automatically."""
+        dest = Path(dest)
         with self._lock:
+            identity: tuple[int, int] | None = None
             try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
+                self._refuse_side_files(dest)
+                identity = self._create_exclusive(dest, "backup")
+                self._refuse_side_files(dest)  # re-checked after creation (review R3 B-f / R4-03)
                 target = sqlite3.connect(dest)
                 try:
                     self._c().backup(target)
+                    # Self-contained file: no WAL header, so opening the copy never leaves -wal/-shm.
+                    self._set_delete_journal(target)
                     verdict = target.execute("PRAGMA quick_check").fetchone()[0]
                 finally:
                     target.close()
-            except (sqlite3.Error, OSError, PersistenceError) as exc:
-                marked = self._quarantine_backup(dest)
+                if verdict != "ok":
+                    raise PersistenceError("backup verification failed (quick_check)")
+            except BaseException as exc:
+                marked = self._quarantine_backup(dest, identity) if identity is not None else "target untouched"
                 if isinstance(exc, PersistenceError):
-                    raise
-                raise self._err(f"backup failed ({marked})", exc) from exc
-            if verdict != "ok":
-                marked = self._quarantine_backup(dest)
-                raise PersistenceError(f"backup verification failed (quick_check); {marked}")
+                    raise PersistenceError(f"{exc}; {marked}", exc.code) from exc
+                if isinstance(exc, (sqlite3.Error, OSError)):
+                    raise self._err(f"backup failed ({marked})", exc) from exc
+                raise
             return dest
 
     @classmethod
@@ -417,58 +453,121 @@ class SqliteEventStore:
         """Restore a backup into a NEW database file and verify it.
 
         Non-destructive by design: refuses an existing `dest` (never overwrites the live
-        database) and refuses backups marked `.invalid`. Swapping the restored file into
-        service is an operator action outside this package (runbook)."""
+        database), refuses backups marked `.invalid` (any case) and a `dest` with leftover
+        journal side files. Swapping the restored file into service is an operator action
+        outside this package (runbook)."""
         backup, dest = Path(backup), Path(dest)
-        if backup.name.endswith(INVALID_BACKUP_SUFFIX) or not backup.is_file():
+        if backup.name.lower().endswith(INVALID_BACKUP_SUFFIX) or not backup.is_file():
             raise PersistenceError(f"backup {backup.name} missing or marked invalid")
-        created = False  # quarantine may ONLY touch a file this call created (review R2-H1)
+        identity: tuple[int, int] | None = None  # set only once THIS call created dest
         try:
+            cls._refuse_side_files(dest)
             src = sqlite3.connect(f"{backup.resolve().as_uri()}?mode=ro", uri=True)
             try:
                 if src.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise PersistenceError(f"backup {backup.name} fails quick_check")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    # Exclusive create (no exists()/connect race): an existing file is never touched.
-                    with open(dest, "xb"):
-                        pass
-                except FileExistsError:
-                    raise PersistenceError("restore target already exists; refusing to overwrite") from None
-                created = True
+                # Review R3 B-d: an empty/foreign SQLite file (e.g. a 0-byte leftover) is a "valid"
+                # database for quick_check; it is NOT an Acurix backup.
+                version = int(src.execute("PRAGMA user_version").fetchone()[0])
+                has_events = src.execute("SELECT count(*) FROM sqlite_master WHERE type='table'"
+                                         " AND name='inspection_event'").fetchone()[0]
+                if version < 1 or not has_events:
+                    raise PersistenceError(f"backup {backup.name} is not an Acurix database "
+                                           f"(user_version {version}, inspection_event {'present' if has_events else 'absent'})")
+                identity = cls._create_exclusive(dest, "restore")
+                cls._refuse_side_files(dest)  # review R3 B-f: re-checked after creation
                 target = sqlite3.connect(dest)
                 try:
                     src.backup(target)
+                    cls._set_delete_journal(target)  # self-contained (see backup())
                     verdict = target.execute("PRAGMA quick_check").fetchone()[0]
                 finally:
                     target.close()
             finally:
                 src.close()
-        except PersistenceError:
-            raise
-        except (sqlite3.Error, OSError) as exc:
-            marked = cls._quarantine_backup(dest) if created else "target untouched"
-            raise PersistenceError(f"restore failed ({marked}): {type(exc).__name__}",
-                                   classify_storage_error(exc)) from exc
-        if verdict != "ok":
-            marked = cls._quarantine_backup(dest)
-            raise PersistenceError(f"restored copy fails quick_check; {marked}")
+            if verdict != "ok":
+                raise PersistenceError("restored copy fails quick_check")
+        except BaseException as exc:
+            marked = cls._quarantine_backup(dest, identity) if identity is not None else "target untouched"
+            if isinstance(exc, PersistenceError):
+                raise PersistenceError(f"{exc}; {marked}", exc.code) from exc
+            if isinstance(exc, (sqlite3.Error, OSError)):
+                raise PersistenceError(f"restore failed ({marked}): {type(exc).__name__}",
+                                       classify_storage_error(exc)) from exc
+            raise  # KeyboardInterrupt, MemoryError, ...: after quarantine, propagate unchanged
         return dest
 
+    _SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
+
     @staticmethod
-    def _quarantine_backup(dest: Path) -> str:
-        if not dest.exists():
-            return "no backup file left"
-        invalid = dest.with_name(dest.name + INVALID_BACKUP_SUFFIX)
+    def _set_delete_journal(conn: sqlite3.Connection) -> None:
+        # Review R3 B-e: the PRAGMA does not raise when the switch is refused; check its answer.
+        mode = conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
+        if str(mode).lower() != "delete":
+            raise PersistenceError(f"copy could not leave journal mode {mode!r} (expected 'delete')")
+
+    @classmethod
+    def _refuse_side_files(cls, dest: Path) -> None:
+        stale = [dest.name + s for s in cls._SIDE_SUFFIXES if dest.with_name(dest.name + s).exists()]
+        if stale:
+            raise PersistenceError(f"target has leftover journal files {stale}; refusing (they could be "
+                                   "replayed into the new file)")
+
+    @staticmethod
+    def _create_exclusive(dest: Path, what: str) -> tuple[int, int]:
+        """Create `dest` atomically (O_EXCL); return its identity. Existing file -> refused, untouched."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            dest.replace(invalid)
-            return f"marked {invalid.name}"
-        except OSError:
+            with open(dest, "xb") as fh:
+                st = os.fstat(fh.fileno())
+        except FileExistsError:
+            raise PersistenceError(f"{what} target already exists; refusing to overwrite") from None
+        return st.st_dev, st.st_ino
+
+    @classmethod
+    def _quarantine_backup(cls, dest: Path, identity: tuple[int, int] | None = None) -> str:
+        """Move `dest` (and its journal side files) to a UNIQUE `<name>.<UTC>[-n].invalid`.
+        With `identity`, a file that is no longer the one this call created is left untouched."""
+        try:
+            st = dest.stat()
+        except FileNotFoundError:
+            return "no backup file left"
+        except OSError as exc:
+            return f"WARNING: {dest.name} not inspectable ({type(exc).__name__}); left in place"
+        if identity is not None and (st.st_dev, st.st_ino) != identity:
+            return f"WARNING: {dest.name} was replaced by another file; left untouched"
+        stamp = utc_now_iso().replace(":", "").replace("-", "").replace(".", "")
+        for n in range(1000):
+            stem = f"{dest.name}.{stamp}" + (f"-{n}" if n else "")
+            invalid = dest.with_name(stem + INVALID_BACKUP_SUFFIX)
+            if invalid.exists() or any(dest.with_name(stem + INVALID_BACKUP_SUFFIX + s).exists()
+                                       for s in cls._SIDE_SUFFIXES):
+                continue
             try:
-                dest.unlink()
-                return "invalid backup deleted (rename failed)"
+                # os.rename never replaces an existing target on Windows (FileExistsError).
+                os.rename(dest, invalid)
+            except FileExistsError:
+                continue
             except OSError:
-                return f"WARNING: invalid backup {dest.name} could not be marked or deleted"
+                # Review R3 B-c: delete only if it is STILL the file this call created.
+                try:
+                    st2 = dest.stat()
+                    if identity is not None and (st2.st_dev, st2.st_ino) != identity:
+                        return f"WARNING: {dest.name} was replaced by another file; left untouched"
+                    dest.unlink()
+                    sides = [dest.name + s for s in cls._SIDE_SUFFIXES if dest.with_name(dest.name + s).exists()]
+                    return "invalid backup deleted (rename failed)" + (
+                        f"; WARNING: side files left {sides} (future restores to this name are refused)"
+                        if sides else "")
+                except OSError:
+                    return f"WARNING: invalid backup {dest.name} could not be marked or deleted"
+            for s in cls._SIDE_SUFFIXES:
+                side = dest.with_name(dest.name + s)
+                if side.exists():
+                    with contextlib.suppress(OSError):
+                        os.rename(side, invalid.with_name(invalid.name + s))
+            return f"marked {invalid.name}"
+        return f"WARNING: no free quarantine name for {dest.name}; left in place"
 
     # -- health --------------------------------------------------------------
     def check(self) -> tuple[bool, str]:
@@ -490,6 +589,15 @@ class SqliteEventStore:
                 missing_cols = expected - cols
                 if missing_cols:
                     return False, f"{table} schema mismatch, missing {sorted(missing_cols)}"
+            if self.target_version >= 3:
+                with self._lock:
+                    trig = self._c().execute("SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                                             (IMMUTABILITY_TRIGGER,)).fetchone()
+                if not trig:
+                    return False, f"immutability trigger {IMMUTABILITY_TRIGGER} missing"
+                # Review R3 B-a: same name is not enough; the definition must be the shipped one.
+                if trig[0] != "inspection_event" or _norm_sql(trig[1]) != _norm_sql(_MIGRATIONS[3][0]):
+                    return False, f"immutability trigger {IMMUTABILITY_TRIGGER} altered"
             return True, f"schema {v}" + (" (read-only)" if self.read_only else "")
         except PersistenceError as exc:
             return False, str(exc)

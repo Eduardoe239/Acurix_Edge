@@ -30,6 +30,7 @@ from tests.support import (
     TempDirTestCase,
     fixture_policy_with,
     request,
+    tamper_event_row,
 )
 
 
@@ -265,7 +266,8 @@ class DuplicateAndCorruptTests(AppCase):
         self.assertTrue(any("EVENT_DUPLICATE" == getattr(r, "code", None) for r in cm.records))
 
     def corrupt(self, a: Application, event_id: str, payload: str) -> None:
-        a.store._c().execute("UPDATE inspection_event SET payload_json = ? WHERE event_id = ?", (payload, event_id))
+        tamper_event_row(a.store._c(), "UPDATE inspection_event SET payload_json = ? WHERE event_id = ?",
+                         (payload, event_id))
 
     def test_corrupt_payload_is_explicit_fault_not_crash(self):
         adapter = FixtureOkAdapter()
@@ -299,8 +301,8 @@ class DuplicateAndCorruptTests(AppCase):
         import hashlib
         for payload in ("{not json", json.dumps({"event_id": o.record.event_id})):
             with self.subTest(payload=payload):
-                a.store._c().execute(
-                    "UPDATE inspection_event SET payload_json = ?, payload_sha256 = ? WHERE event_id = ?",
+                tamper_event_row(
+                    a.store._c(), "UPDATE inspection_event SET payload_json = ?, payload_sha256 = ? WHERE event_id = ?",
                     (payload, hashlib.sha256(payload.encode()).hexdigest(), o.record.event_id))
                 with self.assertRaises(CorruptRecordError) as cm:
                     a.store.get(o.record.event_id)
@@ -368,7 +370,7 @@ class InvalidBackupTests(TempDirTestCase):
                 s.backup(dest)
         self.assertIn("quick_check", str(cm.exception))
         self.assertFalse(dest.exists())
-        self.assertTrue((self.tmp / "bk" / "copy.sqlite.invalid").is_file())
+        self.assertEqual(len(list((self.tmp / "bk").glob("copy.sqlite.*.invalid"))), 1)  # unique name (B1)
 
     def test_valid_backup_is_not_marked(self):
         s = SqliteEventStore(self.tmp / "data" / "db.sqlite")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -51,6 +52,18 @@ class InferenceConfig:
     adapter: str = "noop"
 
 
+CLOCK_TOLERANCE_MAX_S = 10.0  # schema bound: a larger tolerance would hide a real clock regression
+
+
+@dataclass(frozen=True, slots=True)
+class ClockConfig:
+    """Clock trust (owner decision 10/11/2026, AEX-CLK-001). A clock up to
+    `backward_tolerance_s` behind the last persisted event is tolerated and logged; beyond it,
+    FAULT. The same tolerance applies to backward jumps against a time already observed."""
+
+    backward_tolerance_s: float = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class ModelsConfig:
     """Model approval policy (ADR-016): default-deny.
@@ -75,6 +88,7 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    clock: ClockConfig = field(default_factory=ClockConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -97,6 +111,7 @@ _SECTIONS: dict[str, type] = {
     "logging": LoggingConfig,
     "inference": InferenceConfig,
     "models": ModelsConfig,
+    "clock": ClockConfig,
 }
 _TOP_LEVEL = {"config_version", "site_id", "station_id", *_SECTIONS}
 
@@ -184,6 +199,10 @@ def validate(cfg: AppConfig) -> None:
         p.append("models.real_model_loading must be false in 0.1.0 (ADR-016)")
     if not _in(cfg.inference.adapter, SUPPORTED_INFERENCE_ADAPTERS):
         p.append(f"inference.adapter must be one of {sorted(SUPPORTED_INFERENCE_ADAPTERS)}")
+    tol = cfg.clock.backward_tolerance_s
+    if (not isinstance(tol, (int, float)) or isinstance(tol, bool) or not math.isfinite(tol)
+            or not 0 <= tol <= CLOCK_TOLERANCE_MAX_S):
+        p.append(f"clock.backward_tolerance_s must be a number in 0..{CLOCK_TOLERANCE_MAX_S:g} (seconds)")
     if p:
         raise ConfigError(p)
 

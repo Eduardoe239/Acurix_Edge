@@ -22,6 +22,7 @@ from acurix_edge.health.service import ComponentStatus as C
 from acurix_edge.persistence.sqlite_store import (
     AUDIT_GENESIS_SHA256,
     EXPECTED_TABLES,
+    SCHEMA_VERSION,
     PersistenceError,
     SqliteEventStore,
     _MIGRATIONS,
@@ -121,8 +122,8 @@ class Migration1To2Tests(TempDirTestCase):
         src.backup(dst)
         src.close(), dst.close()
         sc = self.migrate(copy)
-        self.assertEqual(sc.schema_version(), 2)
-        self.assertEqual(sc.check(), (True, "schema 2"))
+        self.assertEqual(sc.schema_version(), SCHEMA_VERSION)  # 1 -> 2 -> 3 in one open
+        self.assertEqual(sc.check(), (True, f"schema {SCHEMA_VERSION}"))
         self.assertEqual(event_rows(copy), before)
         self.assertEqual(user_version(original), 1)  # the original was not touched by the rehearsal
         self.assertEqual(len(list(copy.parent.glob("acurix.db.pre-v2-*.bak"))), 1)
@@ -130,8 +131,8 @@ class Migration1To2Tests(TempDirTestCase):
 
         # 2) Then the original.
         s = self.migrate(original)
-        self.assertEqual(s.schema_version(), 2)
-        self.assertEqual(s.check(), (True, "schema 2"))
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        self.assertEqual(s.check(), (True, f"schema {SCHEMA_VERSION}"))
         after = event_rows(original)
         self.assertEqual(after, before)  # nothing lost, nothing altered (all columns)
         self.assertEqual(s.count_events(), 5)
@@ -319,7 +320,8 @@ class ClockRuleTests(TempDirTestCase):
 
     def app(self, clock_now):
         store = SqliteEventStore(AppConfig().database_path(self.tmp))
-        clock = ClockCheck(now=clock_now, last_event_utc=store.last_event_persisted_utc)
+        clock = ClockCheck(backward_tolerance_s=AppConfig().clock.backward_tolerance_s, now=clock_now,
+                           last_event_utc=store.last_event_persisted_utc)
         a = Application(AppConfig(), self.tmp, model_policy=FIXTURE_POLICY, inference=FixtureOkAdapter(),
                         rule=FixtureApprovedRule(), capture_probe=lambda: (C.OK, "fixture"), store=store,
                         host_checks={**HEALTHY_HOST, "clock": clock})

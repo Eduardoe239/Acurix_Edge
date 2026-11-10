@@ -244,7 +244,8 @@ class Application:
                         ErrorCode.CAP_001)
             return self._capture_probe()
 
-        host: dict[str, Check] = {"clock": ClockCheck(last_event_utc=self.store.last_event_persisted_utc),
+        host: dict[str, Check] = {"clock": ClockCheck(backward_tolerance_s=self.config.clock.backward_tolerance_s,
+                                                      last_event_utc=self.store.last_event_persisted_utc),
                                   "memory": memory_check(), "cpu": CpuCheck(), "gpu": GpuCheck()}
         unknown = set(host_checks or {}) - set(host)
         if unknown:
