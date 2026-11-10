@@ -186,9 +186,10 @@ class BackupRestoreTests(StoreCase):
 
 
 class MigrationMechanismTests(StoreCase):
-    """Proves the mechanism is ready for migration 2 using a TEST-ONLY migration (not Anexo 02A)."""
+    """Generic mechanism, exercised with a TEST-ONLY migration 3 on top of the shipped registry
+    (migration 2 itself is covered by tests/unit/test_migration_002.py)."""
 
-    def v1_with_events(self) -> list[str]:
+    def v2_with_events(self) -> list[str]:
         s = SqliteEventStore(self.tmp / "m.db")
         s.open()
         ids = []
@@ -199,35 +200,35 @@ class MigrationMechanismTests(StoreCase):
         s.close()
         return ids
 
-    def test_v2_applied_in_transaction_after_backup_and_events_intact(self):
-        ids = self.v1_with_events()
+    def test_v3_applied_in_transaction_after_backup_and_events_intact(self):
+        ids = self.v2_with_events()
 
-        class V2(SqliteEventStore):
-            MIGRATIONS = {**_MIGRATIONS, 2: ("CREATE TABLE test_only_m2 (x INTEGER)",)}
+        class V3(SqliteEventStore):
+            MIGRATIONS = {**_MIGRATIONS, 3: ("CREATE TABLE test_only_m3 (x INTEGER)",)}
 
-        s = V2(self.tmp / "m.db")
+        s = V3(self.tmp / "m.db")
         s.open()
         self.addCleanup(s.close)
-        self.assertEqual(s.schema_version(), 2)
-        self.assertEqual(s.check(), (True, "schema 2"))
+        self.assertEqual(s.schema_version(), 3)
+        self.assertEqual(s.check(), (True, "schema 3"))
         self.assertEqual([e.event_id for e in s.list_events()], ids)
-        self.assertEqual(len(list(self.tmp.glob("m.db.pre-v2-*.bak"))), 1)
+        self.assertEqual(len(list(self.tmp.glob("m.db.pre-v3-*.bak"))), 1)
 
     def test_failed_migration_rolls_back_and_keeps_data(self):
-        ids = self.v1_with_events()
+        ids = self.v2_with_events()
 
         class Broken(SqliteEventStore):
-            MIGRATIONS = {**_MIGRATIONS, 2: ("CREATE TABLE test_only_m2 (x INTEGER)", "THIS IS NOT SQL")}
+            MIGRATIONS = {**_MIGRATIONS, 3: ("CREATE TABLE test_only_m3 (x INTEGER)", "THIS IS NOT SQL")}
 
         with self.assertRaises(PersistenceError) as ctx:
             Broken(self.tmp / "m.db").open()
         self.assertIs(ctx.exception.code, ErrorCode.DB_001)
-        s = self.store("m.db")  # shipped registry (v1) opens the untouched database
-        self.assertEqual(s.schema_version(), 1)
+        s = self.store("m.db")  # shipped registry (v2) opens the untouched database
+        self.assertEqual(s.schema_version(), 2)
         tables = {r[0] for r in s._c().execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertNotIn("test_only_m2", tables)
+        self.assertNotIn("test_only_m3", tables)
         self.assertEqual([e.event_id for e in s.list_events()], ids)
-        self.assertEqual(len(list(self.tmp.glob("m.db.pre-v2-*.bak"))), 1)
+        self.assertEqual(len(list(self.tmp.glob("m.db.pre-v3-*.bak"))), 1)
 
     def test_non_contiguous_registry_rejected(self):
         class Gap(SqliteEventStore):

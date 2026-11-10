@@ -69,7 +69,11 @@ class InjectedFailureTests(HealthyAppCase):
             ("camera", dict(camera=fixed(C.FAULT, "unplugged", ErrorCode.CAP_001)), "FAULT", "AEX-CAP-001",
              "DEGRADED"),
             ("models", dict(inference=False), "DEGRADED", None, "DEGRADED"),
-            ("clock", dict(host={"clock": fixed(C.FAULT)}), "FAULT", None, "DEGRADED"),
+            # clock is critical since 10/11/2026: its FAULT (went back before the last event) is overall FAULT
+            ("clock", dict(host={"clock": fixed(C.FAULT, "back in time", ErrorCode.CLK_001)}), "FAULT",
+             "AEX-CLK-001", "FAULT"),
+            ("clock", dict(host={"clock": fixed(C.DEGRADED, "jump", ErrorCode.CLK_001)}), "DEGRADED",
+             "AEX-CLK-001", "DEGRADED"),
             ("memory", dict(host={"memory": memory_check(lambda: {"total_gb": 7.73, "available_gb": 0.79})}),
              "DEGRADED", "AEX-CAS-004", "DEGRADED"),
             ("cpu", dict(host={"cpu": fixed(C.UNKNOWN)}), "UNKNOWN", None, "DEGRADED"),
@@ -143,18 +147,36 @@ class InjectedFailureTests(HealthyAppCase):
 
 class ProbeUnitTests(unittest.TestCase):
     def test_clock(self):
+        # Clock problems other than "earlier than the last event" are DEGRADED + AEX-CLK-001.
         before_floor = ClockCheck(now=lambda: CLOCK_FLOOR_UTC - timedelta(days=1))
-        self.assertIs(before_floor()[0], C.FAULT)
+        self.assertEqual(before_floor()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
         t = [datetime(2026, 11, 10, tzinfo=timezone.utc)]
-        m = [100.0]
-        clock = ClockCheck(now=lambda: t[0], monotonic=lambda: m[0])
-        self.assertIs(clock()[0], C.OK)
+        clock = ClockCheck(now=lambda: t[0])
+        self.assertEqual(clock(), (C.OK, "UTC clock plausible"))
         t[0] -= timedelta(seconds=30)
-        m[0] += 1.0
-        self.assertIs(clock()[0], C.DEGRADED)  # wall clock jumped back
-        m[0] += 1.0
+        self.assertEqual(clock()[0::2], (C.DEGRADED, ErrorCode.CLK_001))  # wall clock jumped back
         t[0] += timedelta(seconds=1)
-        self.assertIs(clock()[0], C.OK)
+        self.assertIs(clock()[0], C.DEGRADED)  # still behind a time already observed
+        t[0] += timedelta(seconds=30)
+        self.assertIs(clock()[0], C.OK)  # caught up
+
+    def test_clock_unreadable_is_degraded_not_raised(self):
+        def broken():
+            raise OSError("rtc")
+
+        self.assertEqual(ClockCheck(now=broken)()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
+        naive = ClockCheck(now=lambda: datetime(2026, 11, 10))
+        self.assertEqual(naive()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
+        bad_last = ClockCheck(now=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc), last_event_utc=lambda: "x")
+        self.assertEqual(bad_last()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
+
+    def test_clock_before_last_event_is_fault(self):
+        now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+        last = "2026-11-10T12:00:00.001Z"  # strict: 1 ms in the future of the clock is already FAULT
+        self.assertEqual(ClockCheck(now=lambda: now, last_event_utc=lambda: last)()[0::2],
+                         (C.FAULT, ErrorCode.CLK_001))
+        same = "2026-11-10T12:00:00.000Z"
+        self.assertIs(ClockCheck(now=lambda: now, last_event_utc=lambda: same)()[0], C.OK)
 
     def test_memory_unknown_when_unmeasurable(self):
         self.assertIs(memory_check(lambda: None)()[0], C.UNKNOWN)

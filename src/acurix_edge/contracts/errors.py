@@ -42,6 +42,8 @@ class ErrorCode(StrEnum):
     DB_002 = "AEX-DB-002"
     DEV_001 = "AEX-DEV-001"
     SYS_001 = "AEX-SYS-001"
+    # Owner decision 10/11/2026 (Ordem 2 complement): internal, no HTTP status.
+    CLK_001 = "AEX-CLK-001"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,7 @@ CATALOG: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.DB_002: ErrorSpec(507, "Disco cheio"),
     ErrorCode.DEV_001: ErrorSpec(None, "Periférico sem comunicação"),
     ErrorCode.SYS_001: ErrorSpec(500, "Erro interno"),
+    ErrorCode.CLK_001: ErrorSpec(None, "Relógio não confiável"),
 }
 
 

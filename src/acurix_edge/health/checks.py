@@ -5,9 +5,14 @@ Thresholds used here and their source:
   light work). Not a guarantee of execution, a conservative guardrail.
 - Disk: free < storage.min_free_disk_mb (configuration) -> DEGRADED + AEX-DB-002. An actual
   write failure for lack of space is handled by persistence (AEX-DB-002 + FAULT).
-- Clock: earlier than CLOCK_FLOOR_UTC (Foundation release month) -> FAULT (timestamps cannot be
-  trusted); a backward jump > CLOCK_BACKWARD_TOLERANCE_S between checks -> DEGRADED.
-  The AEX catalog has no clock code: `code` stays None (reported as a catalog gap).
+- Clock (owner decision 10/11/2026, code AEX-CLK-001 "Relógio não confiável", internal):
+  * wall clock earlier than the last persisted event (`persisted_at_utc`, strict comparison,
+    no tolerance) -> FAULT: the clock went back in time and new records would be out of order;
+  * any other clock problem -> DEGRADED (blocks OBSERVING): earlier than CLOCK_FLOOR_UTC; earlier
+    than the highest wall time already observed by this check minus CLOCK_BACKWARD_TOLERANCE_S
+    (stays DEGRADED until the clock catches up, not only on the check that saw the jump);
+    unreadable clock or last-event time. The clock is registered as CRITICAL so that the
+    FAULT case latches the system; the check itself never raises.
 - CPU: informational (no approved load threshold); unreadable -> UNKNOWN.
 - GPU: optional. No `nvidia-smi` on PATH -> DISABLED (CPU fallback is mandatory); probe
   error/timeout -> DEGRADED. Result cached CACHE_S seconds (subprocess is not run per frame).
@@ -61,23 +66,45 @@ def memory_check(probe: Callable[[], dict[str, float] | None] = host_memory,
     return _check
 
 
+def _parse_utc(ts: str) -> datetime:
+    return datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+
+
 class ClockCheck:
     def __init__(self, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._now, self._mono = now, monotonic
-        self._last: tuple[datetime, float] | None = None
+                 last_event_utc: Callable[[], str | None] = lambda: None) -> None:
+        self._now, self._last_event = now, last_event_utc
+        self._high_water: datetime | None = None
         self._lock = threading.Lock()
 
     def __call__(self) -> CheckResult:
-        wall, mono = self._now(), self._mono()
+        try:
+            wall = self._now()
+            if wall.tzinfo is None:
+                raise ValueError("naive datetime")
+        except Exception as exc:
+            return ComponentStatus.DEGRADED, f"system clock unreadable: {type(exc).__name__}", ErrorCode.CLK_001
+        try:
+            last_raw = self._last_event()
+            last_event = _parse_utc(last_raw) if last_raw is not None else None
+        except Exception as exc:
+            return (ComponentStatus.DEGRADED, f"last event time unreadable: {type(exc).__name__}",
+                    ErrorCode.CLK_001)
+        if last_event is not None and wall < last_event:
+            return (ComponentStatus.FAULT,
+                    f"system clock {wall.isoformat()} earlier than last persisted event {last_raw} (went back in time)",
+                    ErrorCode.CLK_001)
         with self._lock:
-            last, self._last = self._last, (wall, mono)
+            high = self._high_water
+            if high is None or wall > high:
+                self._high_water = wall
         if wall < CLOCK_FLOOR_UTC:
-            return ComponentStatus.FAULT, f"system clock {wall.isoformat()} earlier than {CLOCK_FLOOR_UTC.date()}"
-        if last is not None:
-            drift = (wall - last[0]).total_seconds() - (mono - last[1])
-            if drift < -CLOCK_BACKWARD_TOLERANCE_S:
-                return ComponentStatus.DEGRADED, f"wall clock jumped back {-drift:.1f} s since last check"
+            return (ComponentStatus.DEGRADED, f"system clock {wall.isoformat()} earlier than {CLOCK_FLOOR_UTC.date()}",
+                    ErrorCode.CLK_001)
+        if high is not None and (high - wall).total_seconds() > CLOCK_BACKWARD_TOLERANCE_S:
+            return (ComponentStatus.DEGRADED,
+                    f"wall clock {(high - wall).total_seconds():.1f} s behind a time already observed",
+                    ErrorCode.CLK_001)
         return ComponentStatus.OK, "UTC clock plausible"
 
 

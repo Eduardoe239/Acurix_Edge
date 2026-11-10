@@ -26,13 +26,27 @@ from typing import Any, ClassVar
 from acurix_edge.contracts.errors import ContractError, ErrorCode
 from acurix_edge.contracts.events import EventEnvelope, utc_now_iso
 
-SCHEMA_VERSION = 1  # highest migration shipped in this release (migration 2 of Anexo 02A is PROPOSED, not here)
+SCHEMA_VERSION = 2  # highest migration shipped (migration 2 = Anexo 02A §2, APPROVED 10/11/2026)
 MAX_PAGE = 1000
-EXPECTED_TABLES = frozenset({"inspection_event", "audit_entry"})
+EXPECTED_TABLES = frozenset({
+    "inspection_event", "audit_entry",
+    # migration 2
+    "user_account", "login_session", "inspection_session", "cascade_step", "review", "media_asset",
+    "system_incident", "export_record",
+})
 EXPECTED_EVENT_COLUMNS = frozenset({
     "event_id", "session_id", "inspection_id", "capture_sequence", "result", "inference_status",
     "rule_id", "rule_version", "model_id", "model_version", "model_sha256", "payload_sha256",
 })
+EXPECTED_AUDIT_COLUMNS = frozenset({"audit_id", "detail_json", "prev_sha256", "entry_sha256"})
+
+# Audit hash chain (AUD-002). entry_sha256 = SHA-256 of the canonical JSON array
+# [AUDIT_CHAIN_SCHEME, prev_sha256, occurred_at_utc, actor_ref, action, target, detail_json, correlation_id].
+# The first entry's prev is AUDIT_GENESIS_SHA256. Entries written before migration 2 keep NULL hash
+# columns (never rewritten); their hash is computed on the fly with the same formula, so the first
+# chained entry's prev_sha256 commits to the whole legacy prefix.
+AUDIT_CHAIN_SCHEME = "aex-audit-chain-v1"
+AUDIT_GENESIS_SHA256 = "0" * 64
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -82,7 +96,119 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         )""",
         "CREATE INDEX ix_audit_time ON audit_entry (occurred_at_utc)",
     ),
+    # Migration 2 — Anexo 02A §2, APPROVED 10/11/2026. Transcribed verbatim (statements and
+    # columns unchanged; only SQL comments dropped). Never edit: a change is migration 3.
+    2: (
+        """CREATE TABLE user_account (
+  user_id         TEXT PRIMARY KEY,
+  username        TEXT NOT NULL UNIQUE,
+  display_name    TEXT,
+  role            TEXT NOT NULL CHECK (role IN ('operator','reviewer','admin','support')),
+  password_hash   TEXT NOT NULL,
+  active          INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  failed_logins   INTEGER NOT NULL DEFAULT 0,
+  locked_until_utc TEXT,
+  created_at_utc  TEXT NOT NULL,
+  updated_at_utc  TEXT NOT NULL
+)""",
+        """CREATE TABLE login_session (
+  token_sha256    TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES user_account(user_id),
+  created_at_utc  TEXT NOT NULL,
+  last_seen_utc   TEXT NOT NULL,
+  reauth_until_utc TEXT,
+  revoked         INTEGER NOT NULL DEFAULT 0
+)""",
+        """CREATE TABLE inspection_session (
+  session_id      TEXT PRIMARY KEY,
+  state           TEXT NOT NULL CHECK (state IN ('ACTIVE','CLOSED','INTERRUPTED')),
+  started_at_utc  TEXT NOT NULL,
+  ended_at_utc    TEXT,
+  started_by      TEXT NOT NULL REFERENCES user_account(user_id),
+  config_version  TEXT NOT NULL,
+  config_sha256   TEXT NOT NULL,
+  report_json     TEXT
+)""",
+        """CREATE TABLE cascade_step (
+  event_id        TEXT NOT NULL REFERENCES inspection_event(event_id),
+  step_index      INTEGER NOT NULL CHECK (step_index >= 0),
+  stage           TEXT NOT NULL CHECK (stage IN ('quality_gate','anomaly','router','specialist')),
+  status          TEXT NOT NULL,
+  model_id        TEXT,
+  model_version   TEXT,
+  model_sha256    TEXT,
+  result          TEXT,
+  confidence      REAL CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  duration_ms     REAL NOT NULL CHECK (duration_ms >= 0),
+  PRIMARY KEY (event_id, step_index)
+)""",
+        """CREATE TABLE review (
+  review_id       TEXT PRIMARY KEY,
+  event_id        TEXT NOT NULL REFERENCES inspection_event(event_id),
+  review_result   TEXT NOT NULL CHECK (review_result IN ('CONFIRM','PASS','DEFECT','UNCLEAR')),
+  class_id        TEXT,
+  justification   TEXT NOT NULL,
+  reviewer_id     TEXT NOT NULL REFERENCES user_account(user_id),
+  reviewed_at_utc TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE
+)""",
+        """CREATE TABLE media_asset (
+  asset_id        TEXT PRIMARY KEY,
+  event_id        TEXT NOT NULL REFERENCES inspection_event(event_id),
+  storage_ref     TEXT NOT NULL,
+  sha256          TEXT NOT NULL,
+  bytes           INTEGER NOT NULL,
+  retention_until_utc TEXT NOT NULL,
+  deleted_at_utc  TEXT
+)""",
+        """CREATE TABLE system_incident (
+  incident_id     TEXT PRIMARY KEY,
+  code            TEXT NOT NULL,
+  severity        TEXT NOT NULL CHECK (severity IN ('S1','S2','S3','S4')),
+  opened_at_utc   TEXT NOT NULL,
+  closed_at_utc   TEXT,
+  detail_json     TEXT NOT NULL
+)""",
+        """CREATE TABLE export_record (
+  export_id       TEXT PRIMARY KEY,
+  requested_by    TEXT NOT NULL REFERENCES user_account(user_id),
+  filters_json    TEXT NOT NULL,
+  include_media   INTEGER NOT NULL CHECK (include_media IN (0,1)),
+  rows            INTEGER NOT NULL,
+  sha256          TEXT NOT NULL,
+  created_at_utc  TEXT NOT NULL
+)""",
+        "CREATE INDEX ix_review_event   ON review (event_id)",
+        "CREATE INDEX ix_media_retention ON media_asset (retention_until_utc) WHERE deleted_at_utc IS NULL",
+        "CREATE INDEX ix_incident_open  ON system_incident (opened_at_utc) WHERE closed_at_utc IS NULL",
+        "ALTER TABLE audit_entry ADD COLUMN prev_sha256 TEXT",
+        "ALTER TABLE audit_entry ADD COLUMN entry_sha256 TEXT",
+    ),
 }
+
+
+def audit_entry_sha256(prev_sha256: str, occurred_at_utc: str, actor_ref: str, action: str, target: str,
+                       detail_json: str, correlation_id: str | None) -> str:
+    canonical = json.dumps([AUDIT_CHAIN_SCHEME, prev_sha256, occurred_at_utc, actor_ref, action, target,
+                            detail_json, correlation_id], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class AuditChainReport:
+    """Result of verify_audit_chain(). `ok` False => `first_bad_audit_id` and `problem` set."""
+
+    __slots__ = ("ok", "entries", "legacy_entries", "chained_entries", "tip_sha256", "first_bad_audit_id",
+                 "problem")
+
+    def __init__(self) -> None:
+        self.ok = True
+        self.entries = self.legacy_entries = self.chained_entries = 0
+        self.tip_sha256 = AUDIT_GENESIS_SHA256
+        self.first_bad_audit_id: int | None = None
+        self.problem: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in self.__slots__}
 
 
 class PersistenceError(RuntimeError):
@@ -147,6 +273,9 @@ class SqliteEventStore:
         self._conn: sqlite3.Connection | None = None
         self._timeout_s = timeout_s
         self.read_only = read_only
+        # Latest persisted_at_utc of inspection_event (clock-regression check, AEX-CLK-001).
+        # Loaded once at open, then advanced by append(): no table scan per health check.
+        self._last_event_persisted_utc: str | None = None
 
     def _err(self, prefix: str, exc: BaseException) -> PersistenceError:
         code = classify_storage_error(exc)
@@ -168,6 +297,7 @@ class SqliteEventStore:
                                            timeout=self._timeout_s, isolation_level=None, check_same_thread=False)
                     self._conn = conn
                     conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                    self._load_last_event_time()
                     return
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(self._path, timeout=self._timeout_s, isolation_level=None, check_same_thread=False)
@@ -176,6 +306,7 @@ class SqliteEventStore:
                 conn.execute("PRAGMA journal_mode = WAL")
                 conn.execute("PRAGMA synchronous = FULL")
                 self._migrate()
+                self._load_last_event_time()
             except PersistenceError:
                 self.close()
                 raise
@@ -203,6 +334,19 @@ class SqliteEventStore:
     def _require_writable(self) -> None:
         if self.read_only:
             raise PersistenceError("database opened read-only")
+
+    def _load_last_event_time(self) -> None:
+        # A missing/malformed inspection_event leaves None: check() reports that schema as FAULT.
+        try:
+            row = self._c().execute("SELECT max(persisted_at_utc) FROM inspection_event").fetchone()
+            self._last_event_persisted_utc = row[0] if row and isinstance(row[0], str) else None
+        except sqlite3.OperationalError:
+            self._last_event_persisted_utc = None
+
+    def last_event_persisted_utc(self) -> str | None:
+        """Latest `persisted_at_utc` ever written to inspection_event (None: no event)."""
+        with self._lock:
+            return self._last_event_persisted_utc
 
     # -- migrations ----------------------------------------------------------
     def schema_version(self) -> int:
@@ -340,11 +484,12 @@ class SqliteEventStore:
             missing = EXPECTED_TABLES - tables
             if missing:
                 return False, f"missing tables {sorted(missing)}"
-            with self._lock:
-                cols = {r[1] for r in self._c().execute("PRAGMA table_info(inspection_event)")}
-            missing_cols = EXPECTED_EVENT_COLUMNS - cols
-            if missing_cols:
-                return False, f"inspection_event schema mismatch, missing {sorted(missing_cols)}"
+            for table, expected in (("inspection_event", EXPECTED_EVENT_COLUMNS), ("audit_entry", EXPECTED_AUDIT_COLUMNS)):
+                with self._lock:
+                    cols = {r[1] for r in self._c().execute(f"PRAGMA table_info({table})")}
+                missing_cols = expected - cols
+                if missing_cols:
+                    return False, f"{table} schema mismatch, missing {sorted(missing_cols)}"
             return True, f"schema {v}" + (" (read-only)" if self.read_only else "")
         except PersistenceError as exc:
             return False, str(exc)
@@ -366,13 +511,14 @@ class SqliteEventStore:
             digest = env.payload_sha256()
             model = env.model or {}
             rule = env.rule or {}
+            persisted_at = utc_now_iso()
             params = (
                 env.event_id, env.schema_version, env.site_id, env.station_id, env.session_id,
                 env.inspection_id, env.captured_at_utc, env.capture_sequence, env.result.value, env.reason, env.inference_status,
                 rule.get("id"), rule.get("version"), env.class_id, env.confidence, model.get("id"),
                 model.get("version"), model.get("sha256"), env.configuration["version"],
                 env.configuration["sha256"], env.review_status.value, env.software_version, payload, digest,
-                utc_now_iso(),
+                persisted_at,
             )
         except Exception as exc:
             raise self._err("cannot serialize event", exc) from exc
@@ -398,6 +544,8 @@ class SqliteEventStore:
                     params,
                 )
                 conn.execute("COMMIT")
+                if self._last_event_persisted_utc is None or persisted_at > self._last_event_persisted_utc:
+                    self._last_event_persisted_utc = persisted_at
                 return AppendOutcome.INSERTED
             except IdempotencyConflict:
                 raise
@@ -478,16 +626,89 @@ class SqliteEventStore:
         from acurix_edge.observability.logging import redact
 
         self._require_writable()
+        occurred = utc_now_iso()
+        detail_json = json.dumps(redact(detail or {}), sort_keys=True, default=str)
+        with self._lock:
+            conn = self._c()
+            try:
+                # Read the chain tip and insert under one write lock: no fork of the chain.
+                conn.execute("BEGIN IMMEDIATE")
+                prev = self._audit_tip(conn)
+                entry = audit_entry_sha256(prev, occurred, actor_ref, action, target, detail_json, correlation_id)
+                conn.execute(
+                    "INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json, correlation_id,"
+                    " prev_sha256, entry_sha256) VALUES (?,?,?,?,?,?,?,?)",
+                    (occurred, actor_ref, action, target, detail_json, correlation_id, prev, entry),
+                )
+                conn.execute("COMMIT")
+            except Exception as exc:
+                try:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                if isinstance(exc, PersistenceError):
+                    raise
+                raise self._err("audit write failed", exc) from exc
+
+    _AUDIT_CHAIN_COLUMNS = ("SELECT audit_id, occurred_at_utc, actor_ref, action, target, detail_json, correlation_id,"
+                            " prev_sha256, entry_sha256 FROM audit_entry")
+
+    def _audit_tip(self, conn: sqlite3.Connection) -> str:
+        """Hash of the last audit entry. A chained tip is trusted as stored (verify_audit_chain()
+        checks it); a legacy (pre-migration-2) tip is recomputed over the legacy prefix once."""
+        row = conn.execute("SELECT entry_sha256 FROM audit_entry ORDER BY audit_id DESC LIMIT 1").fetchone()
+        if row is None:
+            return AUDIT_GENESIS_SHA256
+        if row[0] is not None:
+            return str(row[0])
+        report = self._walk_audit_chain(conn)
+        if not report.ok:
+            raise PersistenceError(f"audit chain broken at audit_id {report.first_bad_audit_id}: {report.problem}")
+        return report.tip_sha256
+
+    @staticmethod
+    def _walk_audit_chain(conn: sqlite3.Connection) -> AuditChainReport:
+        rep = AuditChainReport()
+        prev = AUDIT_GENESIS_SHA256
+        for audit_id, occurred, actor, action, target, detail_json, corr, stored_prev, stored_entry in conn.execute(
+                SqliteEventStore._AUDIT_CHAIN_COLUMNS + " ORDER BY audit_id"):
+            rep.entries += 1
+            problem: str | None = None
+            if not all(isinstance(v, str) for v in (occurred, actor, action, target, detail_json)) or (
+                    corr is not None and not isinstance(corr, str)):
+                problem = "non-text audit field"
+                computed = ""
+            else:
+                computed = audit_entry_sha256(prev, occurred, actor, action, target, detail_json, corr)
+            if problem is None:
+                if stored_prev is None and stored_entry is None:
+                    if rep.chained_entries:
+                        problem = "unchained entry after the chain started (hashes removed or row inserted)"
+                    rep.legacy_entries += 1
+                else:
+                    rep.chained_entries += 1
+                    if stored_prev != prev:
+                        problem = "prev_sha256 does not match the previous entry (entry removed or reordered)"
+                    elif stored_entry != computed:
+                        problem = "entry_sha256 does not match the entry content (entry altered)"
+            if problem is not None:
+                rep.ok, rep.first_bad_audit_id, rep.problem = False, int(audit_id), problem
+                return rep
+            prev = computed
+        rep.tip_sha256 = prev
+        return rep
+
+    def verify_audit_chain(self) -> AuditChainReport:
+        """Full scan of audit_entry recomputing every hash (AUD-002). Detects altered, removed
+        (not at the tail), reordered or inserted entries. Does NOT detect truncation of the newest
+        entries or a full recomputation by someone with write access: keep the reported
+        `tip_sha256` outside the database to anchor it."""
         with self._lock:
             try:
-                self._c().execute(
-                    "INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json, correlation_id)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (utc_now_iso(), actor_ref, action, target,
-                     json.dumps(redact(detail or {}), sort_keys=True, default=str), correlation_id),
-                )
+                return self._walk_audit_chain(self._c())
             except sqlite3.Error as exc:
-                raise self._err("audit write failed", exc) from exc
+                raise self._err("audit chain read failed", exc) from exc
 
     def last_state_audit(self) -> dict[str, Any] | None:
         """Most recent accepted state transition or fault reset (FAULT latch source, R4-01)."""

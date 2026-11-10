@@ -217,10 +217,11 @@ class ErrorCatalogTests(unittest.TestCase):
 
         openapi_pattern = re.compile(r"^AEX-[A-Z]{2,4}-[0-9]{3}$")  # OpenAPI Problem.code
         outside = {c for c in ErrorCode if not openapi_pattern.fullmatch(c.value)}
-        # KNOWN DOC DIVERGENCE (reported to the owner, OpenAPI not edited): Anexo 02A defines
-        # AEX-STATE-00x, whose 5-letter domain the OpenAPI pattern {2,4} rejects. Any other code
-        # outside the pattern is a new defect and fails here.
+        # KNOWN DOC DIVERGENCE — owner decision 10/11/2026: AEX-STATE-001/002 stay; the defect is
+        # in the OpenAPI Problem.code pattern {2,4} and will be fixed in the document. Until then
+        # this registers the divergence; any other code outside the pattern fails here.
         self.assertEqual(outside, {ErrorCode.STATE_001, ErrorCode.STATE_002})
+        self.assertIsNone(CATALOG[ErrorCode.CLK_001].http_status)  # internal code (owner, 10/11/2026)
         for code in ErrorCode:
             self.assertRegex(code.value, r"^AEX-[A-Z]{2,5}-[0-9]{3}$")
         self.assertEqual(CATALOG[ErrorCode.DB_001].http_status, 503)

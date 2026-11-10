@@ -244,8 +244,8 @@ class Application:
                         ErrorCode.CAP_001)
             return self._capture_probe()
 
-        host: dict[str, Check] = {"clock": ClockCheck(), "memory": memory_check(), "cpu": CpuCheck(),
-                                  "gpu": GpuCheck()}
+        host: dict[str, Check] = {"clock": ClockCheck(last_event_utc=self.store.last_event_persisted_utc),
+                                  "memory": memory_check(), "cpu": CpuCheck(), "gpu": GpuCheck()}
         unknown = set(host_checks or {}) - set(host)
         if unknown:
             raise ValueError(f"unknown host checks {sorted(unknown)}")
@@ -259,7 +259,9 @@ class Application:
             storage_check(self.config.database_path(self.base_dir).parent, self.config.storage.min_free_disk_mb),
             critical=True,
         )
-        self.health.register("clock", host["clock"], critical=False)
+        # Critical (owner decision 10/11/2026): clock earlier than the last persisted event -> FAULT
+        # latch; every other clock problem is reported DEGRADED by the check and blocks OBSERVING.
+        self.health.register("clock", host["clock"], critical=True)
         # resources: outside the OpenAPI enum (owner decision 10/11/2026), still part of `overall`
         self.health.register("memory", host["memory"], critical=False, group=RESOURCES)
         self.health.register("cpu", host["cpu"], critical=False, group=RESOURCES)
