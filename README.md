@@ -59,4 +59,4 @@ config/            exemplo de configuração (sem segredos)
 
 ## Licença
 
-Software proprietário. Copyright (c) 2026 [TITULAR A DEFINIR]. Todos os direitos reservados. Componentes de terceiros e seus avisos estão em `THIRD_PARTY_NOTICES`.
+Software proprietário. Copyright (c) 2026 Luís Eduardo de Sousa Barbosa. Todos os direitos reservados. Componentes de terceiros e seus avisos estão em `THIRD_PARTY_NOTICES`.
