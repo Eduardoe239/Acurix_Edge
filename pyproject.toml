@@ -7,9 +7,13 @@ name = "acurix-edge"
 version = "0.1.0"
 description = "Acurix Edge — local-first visual inspection platform (Foundation 0.1.0, observation mode only)"
 requires-python = ">=3.12,<3.13"
-# Foundation 0.1.0 is intentionally standard-library only.
 # Any runtime dependency requires owner approval + license inventory (ADR-008/013/014).
-dependencies = []
+# Release 0.2.0 (Ordem 3, approved by the owner 13/11/2026): capture needs OpenCV (headless) + NumPy.
+# Exact pins: opencv-python-headless 4.12.0.88 requires numpy>=2,<2.3 on Python 3.12.
+dependencies = [
+    "opencv-python-headless==4.12.0.88",
+    "numpy==2.2.6",
+]
 
 [project.scripts]
 acurix-edge = "acurix_edge.__main__:main"

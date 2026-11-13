@@ -64,6 +64,33 @@ class ClockConfig:
     backward_tolerance_s: float = 2.0
 
 
+CAPTURE_QUEUE_MAX = 64          # ADR-014: frames are held in RAM; a larger queue is refused by schema
+# HLT-004: loss -> FAULT within 2 s (target). Detection = timeout + watchdog period (<= 50 ms)
+# + handler, so the timeout itself is capped below 2 s (review B4).
+CAPTURE_FRAME_TIMEOUT_MAX_S = 1.9
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureConfig:
+    """Capture buffer and loss detection (CAP-003, CAP-004, HLT-004).
+
+    - queue_max_frames: bounded capture queue; when full the OLDEST frame is dropped and counted.
+    - drop_alarm_threshold: frames dropped in one session above this -> AEX-CAP-002 (log, audit,
+      health `queue` DEGRADED). 0 means any drop raises the alarm.
+    - frame_timeout_s: a read blocked longer than this is a camera loss (FAULT).
+    - verify_timeout_s: time allowed to open the source and get the first valid frame.
+    - reconnect_interval_s / reconnect_max_attempts: reopening after a loss (0 attempts = never).
+      A reconnection never resumes the previous session.
+    """
+
+    queue_max_frames: int = 4
+    drop_alarm_threshold: int = 0
+    frame_timeout_s: float = 1.0
+    verify_timeout_s: float = 5.0
+    reconnect_interval_s: float = 1.0
+    reconnect_max_attempts: int = 10
+
+
 @dataclass(frozen=True, slots=True)
 class ModelsConfig:
     """Model approval policy (ADR-016): default-deny.
@@ -89,6 +116,7 @@ class AppConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     clock: ClockConfig = field(default_factory=ClockConfig)
+    capture: CaptureConfig = field(default_factory=CaptureConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -112,6 +140,7 @@ _SECTIONS: dict[str, type] = {
     "inference": InferenceConfig,
     "models": ModelsConfig,
     "clock": ClockConfig,
+    "capture": CaptureConfig,
 }
 _TOP_LEVEL = {"config_version", "site_id", "station_id", *_SECTIONS}
 
@@ -203,8 +232,34 @@ def validate(cfg: AppConfig) -> None:
     if (not isinstance(tol, (int, float)) or isinstance(tol, bool) or not math.isfinite(tol)
             or not 0 <= tol <= CLOCK_TOLERANCE_MAX_S):
         p.append(f"clock.backward_tolerance_s must be a number in 0..{CLOCK_TOLERANCE_MAX_S:g} (seconds)")
+    p.extend(_capture_problems(cfg.capture))
     if p:
         raise ConfigError(p)
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _capture_problems(c: CaptureConfig) -> list[str]:
+    p: list[str] = []
+    if not _is_int(c.queue_max_frames) or not 1 <= c.queue_max_frames <= CAPTURE_QUEUE_MAX:
+        p.append(f"capture.queue_max_frames must be int in 1..{CAPTURE_QUEUE_MAX}")
+    if not _is_int(c.drop_alarm_threshold) or not 0 <= c.drop_alarm_threshold <= 1_000_000:
+        p.append("capture.drop_alarm_threshold must be int in 0..1000000")
+    if not _is_num(c.frame_timeout_s) or not 0.05 <= c.frame_timeout_s <= CAPTURE_FRAME_TIMEOUT_MAX_S:
+        p.append(f"capture.frame_timeout_s must be a number in 0.05..{CAPTURE_FRAME_TIMEOUT_MAX_S:g} (HLT-004)")
+    if not _is_num(c.verify_timeout_s) or not 0.1 <= c.verify_timeout_s <= 30:
+        p.append("capture.verify_timeout_s must be a number in 0.1..30")
+    if not _is_num(c.reconnect_interval_s) or not 0.01 <= c.reconnect_interval_s <= 60:
+        p.append("capture.reconnect_interval_s must be a number in 0.01..60")
+    if not _is_int(c.reconnect_max_attempts) or not 0 <= c.reconnect_max_attempts <= 1000:
+        p.append("capture.reconnect_max_attempts must be int in 0..1000")
+    return p
 
 
 def load_config(path: Path | None = None) -> AppConfig:

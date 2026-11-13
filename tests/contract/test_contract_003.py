@@ -11,7 +11,7 @@ import uuid
 
 from acurix_edge import __version__
 from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
-from acurix_edge.contracts.capture import CAPTURE_SCHEMA_VERSION, CapturedFrame, CaptureStatus
+from acurix_edge.contracts.capture import CAPTURE_SCHEMA_VERSION, CapturedFrame, CaptureStatus, FrameQualityMetrics
 from acurix_edge.contracts.decision import DECISION_SCHEMA_VERSION, Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.errors import CATALOG, ContractError, ErrorCode
 from acurix_edge.contracts.events import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -30,8 +30,11 @@ TS = "2026-11-10T12:00:00.000Z"
 
 
 def frame(**kw) -> CapturedFrame:
-    base = dict(frame_id=str(uuid.uuid4()), source_id="fixture-source", sequence=0, captured_at_utc=TS,
-                capture_latency_ms=2.0, input=InputDescriptor(64, 48), status=CaptureStatus.OK)
+    base = dict(frame_id=str(uuid.uuid4()), source_id="fixture-source", sequence=0, monotonic_ns=1_000,
+                captured_at_utc=TS, capture_latency_ms=2.0, input=InputDescriptor(64, 48), status=CaptureStatus.OK,
+                quality_metrics=FrameQualityMetrics(mean_brightness=120.5, sharpness=33.0))
+    if kw.get("status", CaptureStatus.OK) is not CaptureStatus.OK:
+        base["quality_metrics"] = None  # schema 1.1: non-OK frames carry no measurements
     base.update(kw)
     return CapturedFrame(**base)
 
@@ -100,7 +103,11 @@ class CommonContractTests(unittest.TestCase):
     def test_invalid_values_are_rejected(self):
         cases = {
             "frame": [{"captured_at_utc": "2026-11-10 12:00"}, {"capture_latency_ms": -1}, {"sequence": -1},
-                      {"frame_id": "x"}, {"status": "FINE"}, {"software_version": ""}],
+                      {"frame_id": "x"}, {"status": "FINE"}, {"software_version": ""}, {"monotonic_ns": -1},
+                      {"monotonic_ns": 1.5}, {"quality_metrics": None},
+                      {"quality_metrics": {"mean_brightness": 256, "sharpness": 1}},
+                      {"quality_metrics": {"mean_brightness": 10, "sharpness": -1}},
+                      {"quality_metrics": {"mean_brightness": 10, "sharpness": 1, "extra": 0}}],
             "inference": [{"completed_at_utc": "now"}, {"inference_ms": -0.5}, {"status": "MAYBE"},
                           {"software_version": ""}],
             "decision": [{"decided_at_utc": "x"}, {"latency_ms": float("inf")}, {"result": "OK"},
@@ -137,6 +144,17 @@ class FrameContractTests(unittest.TestCase):
                                  "AEX-CAP-001")
         with self.assertRaises(ContractError):
             frame(error_code=ErrorCode.CAP_001)  # OK with error code
+
+    def test_non_ok_must_not_carry_quality_metrics(self):
+        with self.assertRaises(ContractError):
+            frame(status=CaptureStatus.UNKNOWN, error_code=ErrorCode.CAP_001,
+                  quality_metrics=FrameQualityMetrics(10.0, 1.0))
+
+    def test_schema_1_0_frames_are_rejected(self):  # 1.0 was never persisted; only 1.1 is valid
+        d = wire(frame())
+        d["schema_version"] = "1.0"
+        with self.assertRaises(ContractError):
+            CapturedFrame.from_dict(d)
 
     def test_pixels_are_never_serialized(self):
         self.assertNotIn("pixels", frame(pixels=b"\x00" * 16).to_dict())

@@ -5,4 +5,32 @@ Avisos de componentes de terceiros distribuídos com este software.
 Cada entrada: componente, versão exata, licença (SPDX), origem, hash e texto de aviso exigido.
 Inclusão somente após triagem de licença e aprovação do proprietário (ADR-008).
 
-Nenhum componente de terceiros distribuído até o momento.
+------------------------------------------------------------------------------
+1. opencv-python-headless 4.12.0.88
+   Licença: Apache-2.0 (OpenCV); scripts de empacotamento opencv-python: MIT
+   Origem: https://pypi.org/project/opencv-python-headless/4.12.0.88/
+           https://github.com/opencv/opencv-python  |  https://opencv.org/license/
+   Wheel: opencv_python_headless-4.12.0.88-cp37-abi3-win_amd64.whl
+   sha256: 86b413bdd6c6bf497832e346cd5371995de148e579b9774f8eba686dee3f5528
+   Aprovado pelo proprietário em 13/11/2026 (Ordem 3).
+   Componentes embutidos no wheel com licença própria:
+   - FFmpeg (LGPL-2.1-or-later), em cv2/opencv_videoio_ffmpeg*.dll, usado para ler vídeo.
+     Antes de qualquer distribuição a terceiros: manter este aviso, oferecer o código-fonte
+     correspondente do FFmpeg e permitir substituir a DLL (ligação dinâmica).
+   - Demais bibliotecas listadas em LICENSE-3RD-PARTY.txt dentro do wheel.
+   O texto integral das licenças acompanha o pacote instalado (site-packages/cv2/ e
+   opencv_python_headless-4.12.0.88.dist-info/).
+
+------------------------------------------------------------------------------
+2. numpy 2.2.6
+   Licença: BSD-3-Clause
+   Origem: https://pypi.org/project/numpy/2.2.6/  |  https://github.com/numpy/numpy
+   Wheel: numpy-2.2.6-cp312-cp312-win_amd64.whl
+   sha256: c1f9540be57940698ed329904db803cf7a402f3fc200bfe599334c9bd84a40b2
+   Aprovado pelo proprietário em 13/11/2026 (Ordem 3).
+   Componentes embutidos no wheel com licença própria:
+   - OpenBLAS e LAPACK (BSD-3-Clause), em numpy.libs/libscipy_openblas*.dll.
+   - Runtime GCC/libgfortran (GPL-3.0-with-GCC-exception), estaticamente ligado na mesma DLL
+     do OpenBLAS. A GCC Runtime Library Exception permite a distribuição.
+   - Runtime Microsoft Visual C++ (msvcp140*.dll, termos de redistribuição da Microsoft).
+   O texto integral das licenças acompanha o pacote instalado (numpy-2.2.6.dist-info/LICENSE.txt).

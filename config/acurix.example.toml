@@ -22,6 +22,14 @@ adapter = "noop"              # ADR-016: only authorized adapter in 0.1.0; alway
 [clock]                       # AEX-CLK-001 (owner decision 10/11/2026)
 backward_tolerance_s = 2.0    # 0..10 s; clock behind last event within this = logged, beyond = FAULT
 
-[models]                      # ADR-016 default-deny; locked in 0.1.0 (non-empty/true is rejected)
+[capture]                     # CAP-003/CAP-004/HLT-004 (release 0.2.0)
+queue_max_frames = 4          # 1..64; when full the OLDEST frame is dropped and counted
+drop_alarm_threshold = 0      # drops per session above this -> AEX-CAP-002 (0 = any drop)
+frame_timeout_s = 1.0         # 0.05..1.9; a read blocked longer than this = camera lost -> FAULT
+verify_timeout_s = 5.0        # 0.1..30; open + first valid frame before OBSERVING
+reconnect_interval_s = 1.0    # 0.01..60; reopening never resumes the previous session
+reconnect_max_attempts = 10   # 0..1000 (0 = no reconnection)
+
+[models]                   # ADR-016 default-deny; locked in 0.1.0 (non-empty/true is rejected)
 approved_models = []
 real_model_loading = false

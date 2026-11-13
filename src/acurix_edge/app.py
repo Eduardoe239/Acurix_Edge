@@ -28,11 +28,16 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from acurix_edge import SOFTWARE_NAME, __version__
+
+if TYPE_CHECKING:  # importing the service loads OpenCV; the app only needs it when capture is used
+    from acurix_edge.capture.service import CaptureService
 from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
+from acurix_edge.capture.errors import CaptureError
 from acurix_edge.config.settings import AppConfig
+from acurix_edge.contracts.capture import CapturedFrame
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.errors import ContractError, ErrorCode
 from acurix_edge.contracts.events import validate_utc, utc_now_iso
@@ -106,7 +111,10 @@ class Application:
         read_only: bool = False,
         model_policy: ModelPolicy | None = None,
         host_checks: Mapping[str, Check] | None = None,
+        capture: CaptureService | None = None,
     ) -> None:
+        if capture is not None and capture_probe is not None:
+            raise ValueError("use either capture or capture_probe, not both")
         self.config = config
         self.base_dir = base_dir
         self.read_only = read_only
@@ -140,6 +148,10 @@ class Application:
         self._last_health: HealthReport | None = None
         self._store_open_error: str | None = None
         self.queue = QueueGauge()
+        self.capture = capture
+        if capture is not None:
+            capture.on_lost = self._on_capture_lost
+            capture.on_drop_alarm = self._on_capture_drop_alarm
         self.state.subscribe(self._audit_transition)
         self._register_checks(host_checks)
 
@@ -163,6 +175,8 @@ class Application:
         with self._process_lock:
             if self.session_id is not None:
                 self.close_session()
+            if self.capture is not None:
+                self.capture.shutdown()
             self.store.close()
 
     # -- FAULT latch (R4-01) ---------------------------------------------------
@@ -239,6 +253,8 @@ class Application:
             return ComponentStatus.DEGRADED, "no approved decision rule (use case NOT_FROZEN)"
 
         def camera() -> CheckResult:
+            if self.capture is not None:
+                return self.capture.health()
             if self._capture_probe is None:
                 return (ComponentStatus.UNKNOWN, "no capture source in 0.1.0 (absent; real camera not opened)",
                         ErrorCode.CAP_001)
@@ -267,8 +283,61 @@ class Application:
         self.health.register("memory", host["memory"], critical=False, group=RESOURCES)
         self.health.register("cpu", host["cpu"], critical=False, group=RESOURCES)
         self.health.register("gpu", host["gpu"], critical=False, group=RESOURCES)
-        self.health.register("queue", self.queue.check, critical=False, group=RESOURCES)
+        self.health.register("queue", self._queue_check, critical=False, group=RESOURCES)
         self.health.register("decision_rule", decision_rule, critical=False, group=RESOURCES)
+
+    def _queue_check(self) -> CheckResult:
+        """`resources.queue` (Ordem 2 block): inspection gauge + capture buffer counters (CAP-003)."""
+        if self.capture is None:
+            return self.queue.check()
+        c = self.capture.counters(active_only=True)
+        causes =", ".join(f"{k}={v}" for k, v in sorted(c.dropped_by_cause.items())) or "none"
+        detail = (f"capture: captured {c.captured}, delivered {c.delivered}, dropped {c.dropped} ({causes}), "
+                  f"depth {c.depth}/{c.capacity}, max {c.max_depth}, alarm above {c.drop_alarm_threshold}; "
+                  f"inspections in flight {self.queue.depth}")
+        if c.over_limit:
+            return ComponentStatus.DEGRADED, detail, ErrorCode.CAP_002
+        return ComponentStatus.OK, detail
+
+    # -- capture events (called from capture threads) ------------------------------------
+    def _on_capture_lost(self, detail: str, session_id: str | None) -> None:
+        """HLT-004: camera lost during a session -> FAULT (latched) + AEX-CAP-001 in the audit trail.
+        Runs on a capture thread; the state machine and the store are thread-safe."""
+        if session_id is None:
+            return  # not bound to a session: health shows FAULT for the camera, no session to fail
+        self.state.enter_fault(f"CAMERA_LOST: {ErrorCode.CAP_001.value}")
+        if not self.read_only and self.store.is_open:
+            try:
+                self.store.audit(actor_ref="system", action="CAMERA_LOST", target="camera",
+                                 detail={"code": ErrorCode.CAP_001.value, "detail": detail,
+                                         "source_id": self.capture.source.source_id if self.capture else None},
+                                 correlation_id=session_id)
+            except PersistenceError:
+                log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+
+    def _on_capture_drop_alarm(self, counters: Any, session_id: str | None) -> None:
+        """CAP-003: drops above the configured limit -> AEX-CAP-002 in the audit trail (once per session)."""
+        if self.read_only or not self.store.is_open:
+            return
+        try:
+            self.store.audit(actor_ref="system", action="CAPTURE_DROP_LIMIT_EXCEEDED", target="capture_queue",
+                             detail={"code": ErrorCode.CAP_002.value, "counters": counters.to_dict()},
+                             correlation_id=session_id)
+        except PersistenceError:
+            log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+
+    def next_frame(self, timeout: float | None = None) -> CapturedFrame | None:
+        """Next captured frame of the ACTIVE session (None on timeout). Raises SessionError when
+        there is no capture, no session, or FAULT; capture errors propagate (EndOfStream, CaptureLost)."""
+        if self.capture is None:
+            raise SessionError("no capture source configured", ErrorCode.CAP_001)
+        with self._process_lock:
+            if self.state.state is SystemState.FAULT:
+                raise SessionError("capture blocked: FAULT latched", ErrorCode.STATE_002)
+            session_id = self.session_id
+            if session_id is None:
+                raise SessionError("no active session", ErrorCode.SES_003)
+        return self.capture.next_frame(session_id, timeout)
 
     def _evaluate_health(self) -> HealthReport:
         report = self.health.evaluate()
@@ -305,18 +374,63 @@ class Application:
         self._pending_session_id = session_id  # audits of the start transitions carry this id (R4-04)
         try:
             self.state.transition(SystemState.INITIALIZING, "SESSION_START_REQUESTED")
-            report = self._evaluate_health()
-            if report.overall is ComponentStatus.FAULT:
-                self.state.enter_fault("INIT_PRECONDITION_FAULT")
-                raise SessionError("pre-conditions failed: " + ", ".join(
-                    c.name for c in report.all_entries if c.status is not ComponentStatus.OK), ErrorCode.SES_002)
-            target = SystemState.OBSERVING if report.ok else SystemState.DEGRADED
-            self.state.transition(target, "INIT_COMPLETE" if report.ok else "INIT_DEGRADED")
+            try:
+                self._verify_camera(session_id)
+                report = self._evaluate_health()
+                if report.overall is ComponentStatus.FAULT:
+                    self.state.enter_fault("INIT_PRECONDITION_FAULT")
+                    raise SessionError("pre-conditions failed: " + ", ".join(
+                        c.name for c in report.all_entries if c.status is not ComponentStatus.OK),
+                        ErrorCode.SES_002)
+                target = SystemState.OBSERVING if report.ok else SystemState.DEGRADED
+                self.state.transition(target, "INIT_COMPLETE" if report.ok else "INIT_DEGRADED")
+                if self.capture is not None:
+                    self.capture.begin(session_id)  # frames are bound to THIS session only (CAP-004)
+            except BaseException as exc:
+                try:
+                    if self.capture is not None:
+                        self.capture.end()
+                finally:
+                    self._abort_start(session_id, exc)  # runs even if end() raises (review L5)
+                raise
             self._sequence = 0
             self.session_id = session_id  # only after a successful transition
         finally:
             self._pending_session_id = None
         return session_id
+
+    def _abort_start(self, session_id: str, exc: BaseException) -> None:
+        """A failed start must not leave the system in INITIALIZING or in OBSERVING/DEGRADED without
+        a session (review M1/M4/L5): back to IDLE, audited. Decided by the CURRENT state, not by the
+        exception type: handled paths already left INITIALIZING (FAULT keeps its latch, IDLE is final)."""
+        current = self.state.state
+        if current in (SystemState.INITIALIZING, SystemState.OBSERVING, SystemState.DEGRADED):
+            if self.store.is_open:
+                try:
+                    self.store.audit(actor_ref="system", action="SESSION_START_ABORTED", target=str(current),
+                                     detail={"error": type(exc).__name__}, correlation_id=session_id)
+                except PersistenceError:
+                    log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+            self.state.transition(SystemState.IDLE, f"SESSION_START_ABORTED: {type(exc).__name__}")
+
+    def _verify_camera(self, session_id: str) -> None:
+        """HLT-002: with a capture source, the camera must open and deliver a valid frame before
+        OBSERVING. Failure: back to IDLE (not FAULT: nothing was observed), audited with
+        AEX-CAP-001, SessionError(AEX-CAP-001). Called in INITIALIZING."""
+        if self.capture is None:
+            return
+        try:
+            self.capture.verify()
+        except CaptureError as exc:
+            if self.store.is_open:
+                try:
+                    self.store.audit(actor_ref="system", action="CAMERA_UNAVAILABLE", target="camera",
+                                     detail={"code": ErrorCode.CAP_001.value, "detail": str(exc)},
+                                     correlation_id=session_id)
+                except PersistenceError:
+                    log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+            self.state.transition(SystemState.IDLE, f"CAMERA_UNAVAILABLE: {ErrorCode.CAP_001.value}")
+            raise SessionError(f"camera not verified: {exc}", ErrorCode.CAP_001) from exc
 
     def reset_fault(self, reason: str, *, actor_ref: str = "operator") -> None:
         """The ONLY exit from FAULT (R4-01): explicit, audited recovery FAULT -> IDLE.
@@ -357,6 +471,8 @@ class Application:
                                    ErrorCode.SYS_001) from exc
             self._fault_latch = None
             self.state.release_fault(f"FAULT_RESET: {reason.strip()}")
+            if self.capture is not None and self.session_id is not None:
+                self.capture.end(self.session_id)  # the old session is discarded, never resumed (CAP-004)
             self.session_id = None
 
     def close_session(self) -> None:
@@ -364,6 +480,8 @@ class Application:
         with self._process_lock:
             if self.session_id is None:
                 raise SessionError("no active session", ErrorCode.SES_003)
+            if self.capture is not None:
+                self.capture.end(self.session_id)
             if self.state.state is SystemState.FAULT:
                 closed = self.session_id
                 self.session_id = None
@@ -540,6 +658,12 @@ class Application:
         model = self.inference.model
         counters = self.events.counters()
         state = self.state.state
+        if self.capture is not None:  # capture buffer is the source of frame counts (CAP-003)
+            cap = self.capture.counters()
+            frames_received, frames_dropped = cap.captured, cap.dropped
+            max_queue = max(cap.max_depth, self.queue.max_depth)
+        else:
+            frames_received, frames_dropped, max_queue = self.queue.received, self.queue.dropped, self.queue.max_depth
         return {
             # -- OpenAPI Status -------------------------------------------------
             "state": state.value,
@@ -553,13 +677,13 @@ class Application:
             "models": [{**model.to_dict(), "stage": None, "specialist_for": None,
                         "loaded": bool(self.inference.ready)}] if model else [],
             "counters": {
-                "frames_received": self.queue.received,
+                "frames_received": frames_received,
                 "frames_processed": counters.created,
-                "frames_dropped": self.queue.dropped,
+                "frames_dropped": frames_dropped,
                 "events_created": counters.created,
                 "events_persisted": counters.persisted,
                 "events_failed": counters.failed,
-                "max_queue_depth": self.queue.max_depth,
+                "max_queue_depth": max_queue,
             },
             "generated_at_utc": utc_now_iso(),
             # -- extra properties (allowed by the schema; owner decision 10/11/2026) ----------
@@ -578,6 +702,9 @@ class Application:
             "rejected_transitions": self.state.rejected_count,
             "host_memory": host_memory(),
             "mode": "OBSERVATION_ONLY",
+            "capture": ({"source_id": self.capture.source.source_id, "state": self.capture.state.value,
+                         "detail": self.capture.detail, **self.capture.counters().to_dict()}
+                        if self.capture is not None else None),
         }
 
     def health_document(self) -> tuple[int, dict[str, Any]]:
