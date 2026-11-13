@@ -30,6 +30,41 @@ verify_timeout_s = 5.0        # 0.1..30; open + first valid frame before OBSERVI
 reconnect_interval_s = 1.0    # 0.01..60; reopening never resumes the previous session
 reconnect_max_attempts = 10   # 0..1000 (0 = no reconnection)
 
+[quality]                     # QG-001..003 image quality envelope (release 0.3.0)
+# ALL VALUES PROVISIONAL: calibrate in the optical test (Anexo 04A 3.2) with the USB webcam.
+# Changing any limit requires a NEW version (same version + different limits is refused).
+version = "0.1.0"
+status = "provisional"        # only "provisional" is accepted in 0.3.0
+roi_x = 0.15                  # ROI (product template) as fractions of the frame
+roi_y = 0.10
+roi_w = 0.70
+roi_h = 0.80
+min_sharpness = 40.0          # variance of the Laplacian inside the ROI
+min_brightness = 45.0         # mean gray of the frame
+max_brightness = 210.0
+dark_level = 15
+max_dark_fraction = 0.30
+bright_level = 245
+max_bright_fraction = 0.15
+specular_level = 250          # ROI pixels with all channels >= this = specular reflection
+max_specular_fraction = 0.02
+object_delta = 30.0           # |gray - border background| above this = object pixel
+min_object_fraction = 0.15    # object area / ROI area
+max_object_fraction = 0.95    # object filling the ROI = framing wrong (too close)
+background_level = 90.0       # expected template background gray (median of the frame border)
+background_tolerance = 40.0   # |border median - background_level| above this = wrong framing
+max_border_outlier_fraction = 0.05  # border pixels off the background by > object_delta
+border_inset_px = 3           # border band sampled this many px inside the frame edge (0..50)
+max_object_rotation_deg = 10.0  # product axis vs image axes (Anexo 04A 3.3: +/-10 deg)
+
 [models]                   # ADR-016 default-deny; locked in 0.1.0 (non-empty/true is rejected)
 approved_models = []
 real_model_loading = false
+
+# INVENTORY ONLY: never authorizes loading for decision nor a decision. Status NOT_APPROVED only.
+[[models.artifacts]]
+id = "label-skew-geometric"
+version = "0.1.0"
+sha256 = "3a17ec59b99baf866e4bb3fb5da41a211c8c05cfc590048183818715bbccf2cf"
+path = "label-skew-geometric-0.1.0.json"
+status = "NOT_APPROVED"

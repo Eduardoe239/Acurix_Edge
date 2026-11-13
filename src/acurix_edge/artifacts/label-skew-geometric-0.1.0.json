@@ -1,0 +1,16 @@
+{
+  "borderline_low_deg": 3.0,
+  "id": "label-skew-geometric",
+  "kind": "geometric-rule-parameters",
+  "label_delta": 40.0,
+  "max_label_area_fraction": 0.85,
+  "min_label_area_fraction": 0.03,
+  "min_label_elongation": 1.4,
+  "note": "PROVISIONAL values (Ordem 4, 13/11/2026). Calibrate in the optical test, Anexo 04A 3.2, with the USB webcam. NOT approved for decisions.",
+  "object_delta": 30.0,
+  "product_erode_px": 3,
+  "product_square_elongation": 1.15,
+  "skew_tolerance_deg": 5.0,
+  "status": "provisional",
+  "version": "0.1.0"
+}

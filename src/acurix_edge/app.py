@@ -32,24 +32,30 @@ from typing import TYPE_CHECKING, Any
 
 from acurix_edge import SOFTWARE_NAME, __version__
 
-if TYPE_CHECKING:  # importing the service loads OpenCV; the app only needs it when capture is used
+if TYPE_CHECKING:  # these import OpenCV; the app loads them only when capture/vision is used
     from acurix_edge.capture.service import CaptureService
+    from acurix_edge.vision.quality_gate import QualityGate
 from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
 from acurix_edge.capture.errors import CaptureError
-from acurix_edge.config.settings import AppConfig
-from acurix_edge.contracts.capture import CapturedFrame
+from acurix_edge.config.settings import AppConfig, envelope_fingerprint
+from acurix_edge.contracts.capture import CapturedFrame, CaptureStatus
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.errors import ContractError, ErrorCode
 from acurix_edge.contracts.events import EventEnvelope, utc_now_iso, validate_utc
 from acurix_edge.contracts.inference import (
+    ImageQuality,
     InferenceAdapter,
     InferenceRequest,
     InferenceResult,
     InferenceStatus,
+    InputDescriptor,
     RuntimeRef,
 )
+from acurix_edge.contracts.quality import Comparison, QualityReason, QualityResult, QualityStatus
+from acurix_edge.domain.artifacts import ArtifactRejected, ArtifactVerifier
 from acurix_edge.domain.decision_engine import DecisionContext, DecisionEngine, DecisionRule, is_rule_approved
 from acurix_edge.domain.model_policy import ModelPolicy
+from acurix_edge.domain.stages import InspectionStage, UnavailableStage, guarded_run
 from acurix_edge.domain.state_machine import (
     StateMachine,
     SystemState,
@@ -79,6 +85,9 @@ log = logging.getLogger("acurix_edge.app")
 
 _ADAPTERS = {"noop": NoOpInferenceAdapter}
 FAULT_LATCH_FILE = "FAULT_LATCH.json"
+QUALITY_RUNTIME = RuntimeRef(name="quality-gate", version="1", device="cpu")
+ENVELOPE_ACTIONS = ("QUALITY_ENVELOPE_ACTIVATED", "QUALITY_ENVELOPE_CHANGED")
+GATE_FAILURE_LIMIT = 3  # consecutive quality-gate exceptions before health reports DEGRADED
 CaptureProbe = Callable[[], tuple[ComponentStatus, str]]
 
 
@@ -148,6 +157,12 @@ class Application:
         self._last_health: HealthReport | None = None
         self._store_open_error: str | None = None
         self.queue = QueueGauge()
+        self._quality_gate: QualityGate | None = None
+        self._envelope_conflict: str | None = None
+        self._gate_failures = 0  # consecutive quality-gate exceptions (review L-d)
+        # CAS-005: inventory-backed verification; approval only from the policy (never the inventory).
+        self.artifacts = ArtifactVerifier(config.models.artifacts, self.model_policy,
+                                          on_incident=self._on_artifact_incident)
         self.capture = capture
         if capture is not None:
             capture.on_lost = self._on_capture_lost
@@ -168,6 +183,7 @@ class Application:
             self._fault_latch = latch
             if self.state.state is not SystemState.FAULT:
                 self.state.enter_fault(f"FAULT_LATCH_RESTORED: {latch.get('reason', 'unknown')}")
+        self._check_quality_envelope()
         self._evaluate_health()
 
     def shutdown(self) -> None:
@@ -285,6 +301,7 @@ class Application:
         self.health.register("gpu", host["gpu"], critical=False, group=RESOURCES)
         self.health.register("queue", self._queue_check, critical=False, group=RESOURCES)
         self.health.register("decision_rule", decision_rule, critical=False, group=RESOURCES)
+        self.health.register("quality_envelope", self._envelope_check, critical=False, group=RESOURCES)
 
     def _queue_check(self) -> CheckResult:
         """`resources.queue` (Ordem 2 block): inspection gauge + capture buffer counters (CAP-003)."""
@@ -453,6 +470,7 @@ class Application:
                     self._store_open_error = None
                 except PersistenceError as exc:
                     self._store_open_error = str(exc)
+            self._check_quality_envelope()  # review M1-b: the store may have just been reopened
             report = self._evaluate_health()
             if report.overall is ComponentStatus.FAULT:
                 raise SessionError("cannot reset: critical components still FAULT: " + ", ".join(
@@ -567,14 +585,167 @@ class Application:
         return result
 
     def process(self, request: InferenceRequest, *, captured_at_utc: str | None = None) -> ProcessOutcome:
-        """Queue gauge wraps the serialized processing: depth = inspections waiting or in flight."""
+        """LEGACY entry point (0.1.0): the caller declares the input quality and NO quality gate runs.
+        Captured frames MUST go through `process_frame()` (QG-001: every frame is gated). Not called
+        by product code since 0.3.0; kept for the existing contract tests (review L6).
+        Queue gauge wraps the serialized processing: depth = inspections waiting or in flight."""
         self.queue.enter()
         try:
             return self._process(request, captured_at_utc=captured_at_utc)
         finally:
             self.queue.leave()
 
-    def _process(self, request: InferenceRequest, *, captured_at_utc: str | None = None) -> ProcessOutcome:
+    # -- quality gate + stages (QG-001..003, CAS-005, AEX-CV-007) -------------------------
+    @property
+    def quality_gate(self) -> QualityGate:
+        """Created on first use (imports OpenCV only when frames are actually inspected)."""
+        if self._quality_gate is None:
+            from acurix_edge.vision.quality_gate import QualityGate as _Gate
+
+            self._quality_gate = _Gate(self.config.quality)
+        return self._quality_gate
+
+    def process_frame(self, frame: CapturedFrame, *, stage: InspectionStage | None = None) -> ProcessOutcome:
+        """Captured frame -> quality gate (EVERY frame) -> stage (only if VALID) -> decision -> event.
+        INPUT_INVALID -> NO_DECISION with the reasons recorded in the event; no stage is called."""
+        if not isinstance(frame, CapturedFrame) or frame.status is not CaptureStatus.OK or frame.pixels is None:
+            raise ContractError("process_frame requires an OK CapturedFrame with pixels")
+        if self._envelope_conflict is not None:
+            raise SessionError(f"quality envelope refused: {self._envelope_conflict}", ErrorCode.CFG_001)
+        try:
+            quality = self.quality_gate.evaluate(frame.pixels)
+            self._gate_failures = 0
+        except Exception as exc:  # review L5: a gate failure is a recorded INPUT_INVALID, never silent
+            self._gate_failures += 1  # consecutive failures are visible in health (quality_envelope)
+            log.error("quality gate failed", extra={"code": "QUALITY_GATE_ERROR",
+                                                    "ctx": {"error": type(exc).__name__,
+                                                            "consecutive": self._gate_failures}})
+            q = self.config.quality
+            quality = QualityResult(
+                status=QualityStatus.INPUT_INVALID,
+                reasons=(QualityReason("QUALITY_GATE_ERROR", "gate_error", 1.0, 0.0, Comparison.ABOVE_MAX),),
+                metrics={"gate_error": 1.0}, elapsed_ms=0.0, envelope_version=q.version, envelope_status=q.status,
+                envelope_validated=False, roi_px=(0, 0, 0, 0))
+        request = InferenceRequest(
+            inspection_id=frame.frame_id,
+            input=InputDescriptor(frame.input.width, frame.input.height,
+                                  ImageQuality.VALID if quality.is_valid else ImageQuality.INVALID),
+            frame=frame.pixels)
+        self.queue.enter()
+        try:
+            return self._process(request, captured_at_utc=frame.captured_at_utc, quality=quality, stage=stage)
+        finally:
+            self.queue.leave()
+
+    def _shadow_eligible(self, stage: InspectionStage) -> bool:
+        """Owner exception to ADR-017 item 6, condition (a): an UNAPPROVED stage may be called (shadow)
+        only if its exact artifact (id, version, sha256) is in the separate inventory as NOT_APPROVED."""
+        try:
+            model = stage.model
+        except Exception:
+            return False
+        if model is None:
+            return False
+        entry = self.artifacts.entry(model.id, model.version)
+        return entry is not None and entry.ref == model and entry.status == "NOT_APPROVED"
+
+    def load_label_skew_stage(self) -> InspectionStage:
+        """CAS-005: the specialist's parameters are used ONLY after id/version/sha256 verification
+        against the inventory. Any refusal -> incident + an unavailable stage (NO_DECISION)."""
+        from acurix_edge.vision.label_skew import ARTIFACT_ID, STAGE_KIND, LabelSkewSpecialist, ParamsError
+
+        version = next((str(a["version"]) for a in self.config.models.artifacts if a.get("id") == ARTIFACT_ID), "")
+        stage_id = f"{STAGE_KIND}:{ARTIFACT_ID}"
+        try:
+            artifact = self.artifacts.load(ARTIFACT_ID, version)
+            return LabelSkewSpecialist(artifact)
+        except ArtifactRejected as exc:
+            return UnavailableStage(stage_id, STAGE_KIND, f"{exc.reason.value}:{exc.code.value}")
+        except ParamsError as exc:
+            self._audit_incident("ARTIFACT_REJECTED", f"{ARTIFACT_ID}@{version}",
+                                 {"code": ErrorCode.CAS_002.value, "reason": "PARAMS_INVALID", "detail": str(exc)})
+            return UnavailableStage(stage_id, STAGE_KIND, f"PARAMS_INVALID:{ErrorCode.CAS_002.value}")
+
+    def _audit_incident(self, action: str, target: str, detail: dict[str, Any]) -> bool:
+        """Write an audit entry; returns False when it could not be written."""
+        if self.read_only or not self.store.is_open:
+            return False
+        try:
+            self.store.audit(actor_ref="system", action=action, target=target, detail=detail,
+                             correlation_id=self.session_id)
+            return True
+        except PersistenceError:
+            log.error("audit write failed", extra={"code": "AUDIT_WRITE_FAILED"})
+            return False
+
+    def _on_artifact_incident(self, exc: ArtifactRejected) -> None:
+        self._audit_incident("ARTIFACT_REJECTED", f"{exc.artifact_id}@{exc.version}",
+                             {"code": exc.code.value, "reason": exc.reason.value, "detail": str(exc)})
+
+    def _envelope_fingerprint(self) -> tuple[str, str]:
+        return envelope_fingerprint(self.config.quality)
+
+    def _check_quality_envelope(self) -> None:
+        """QG-003: the envelope in use is recorded in the audit trail. A new version is audited
+        as a change; the SAME version with different limits is refused (a limit change must
+        bump the version) — the gate stays unavailable and health reports it."""
+        self._envelope_conflict = None
+        if self.read_only:
+            return
+        if not self.store.is_open:  # review M1-b: never use an envelope that was not audited
+            self._envelope_conflict = "envelope not audited (store unavailable); re-checked on reset_fault"
+            return
+        version, sha = self._envelope_fingerprint()
+        target = f"quality@{version}"
+        detail = {"version": version, "sha256": sha, "status": self.config.quality.status, "validated": False}
+        try:
+            # review M1: the SAME version is checked against its own history, not only the latest record
+            same_version = self.store.last_audit_with_action(ENVELOPE_ACTIONS, target=target)
+            latest = self.store.last_audit_with_action(ENVELOPE_ACTIONS)
+        except PersistenceError as exc:  # review L1: never use an envelope that could not be audited
+            self._envelope_conflict = f"envelope history unreadable ({exc.code.value})"
+            return
+
+        def summary(rec: dict[str, Any] | None) -> dict[str, Any] | None:  # review L2: bounded detail
+            d = rec.get("detail") if rec else None
+            return {"version": d.get("version"), "sha256": d.get("sha256")} if isinstance(d, dict) else None
+
+        def corrupted(rec: dict[str, Any] | None) -> bool:
+            d = rec.get("detail") if rec else None
+            return rec is not None and not (isinstance(d, dict) and isinstance(d.get("sha256"), str)
+                                            and len(d["sha256"]) == 64)
+
+        if corrupted(same_version):  # review L-c: a damaged record is not "different limits"
+            self._envelope_conflict = (f"envelope history for version {version} is corrupted (record unreadable "
+                                       "or without sha256); the version cannot be verified")
+            self._audit_incident("QUALITY_ENVELOPE_REJECTED", target,
+                                 {**detail, "code": ErrorCode.CFG_001.value, "reason": "HISTORY_CORRUPTED"})
+            return
+        mine, prev = summary(same_version), summary(latest)
+        if mine is not None and mine.get("sha256") != sha:
+            self._envelope_conflict = (f"version {version} already recorded with different limits "
+                                       f"(sha {str(mine.get('sha256'))[:12]}...); a limit change needs a new version")
+            self._audit_incident("QUALITY_ENVELOPE_REJECTED", target,
+                                 {**detail, "code": ErrorCode.CFG_001.value, "recorded": mine})
+            return
+        if prev is not None and prev.get("sha256") == sha:
+            return  # already the active envelope
+        action = "QUALITY_ENVELOPE_ACTIVATED" if prev is None else "QUALITY_ENVELOPE_CHANGED"
+        if not self._audit_incident(action, target, {**detail, "previous": prev}):
+            self._envelope_conflict = "envelope activation could not be audited"  # review L1
+
+    def _envelope_check(self) -> CheckResult:
+        q = self.config.quality
+        if self._envelope_conflict is not None:
+            return ComponentStatus.DEGRADED, f"quality envelope refused: {self._envelope_conflict}", ErrorCode.CFG_001
+        if self._gate_failures >= GATE_FAILURE_LIMIT:  # review L-d: a broken gate is not silent in health
+            return (ComponentStatus.DEGRADED, f"quality gate failing: {self._gate_failures} consecutive errors "
+                    "(every frame recorded as INPUT_INVALID/QUALITY_GATE_ERROR)", ErrorCode.SYS_001)
+        return ComponentStatus.OK, (f"quality envelope {q.version} status={q.status.upper()} "
+                                    "(NOT validated: calibrate in the optical test, Anexo 04A 3.2)")
+
+    def _process(self, request: InferenceRequest, *, captured_at_utc: str | None = None,
+                 quality: QualityResult | None = None, stage: InspectionStage | None = None) -> ProcessOutcome:
         # R4-02: caller errors are rejected before any processing (no inference, no event, no result).
         if not isinstance(request, InferenceRequest):
             raise ContractError(f"request must be InferenceRequest, got {type(request).__name__}")
@@ -625,20 +796,49 @@ class Application:
                         result=existing.result.value, reason=existing.reason,
                     )
                 started = time.perf_counter()
-                inference = self._safe_infer(request)
+                extra: dict[str, Any] = {}
+                forced: Decision | None = None
+                if quality is not None:
+                    extra["quality"] = quality.to_dict()
+                if quality is not None and not quality.is_valid:
+                    # QG-002: invalid image -> INPUT_INVALID + NO_DECISION; NO stage/model is called.
+                    codes = ",".join(r.code for r in quality.reasons)
+                    inference = InferenceResult(inspection_id=request.inspection_id, runtime=QUALITY_RUNTIME,
+                                                input=request.input, status=InferenceStatus.INPUT_INVALID,
+                                                error_code=f"QUALITY_GATE:{codes}")
+                    forced = Decision(InspectionResult.NO_DECISION, DecisionReason.INPUT_QUALITY,
+                                      detail=f"INPUT_INVALID: {codes}"[:200])
+                elif stage is not None:
+                    run = guarded_run(stage, request, may_run_unapproved=self._shadow_eligible(stage))
+                    extra["stages"] = [run.to_dict()]
+                    inference = run.for_decision
+                    if inference.model is not None and not self.model_policy.is_model_approved(inference.model):
+                        # defense in depth: the application policy has the last word (ADR-016)
+                        inference = InferenceResult(inspection_id=request.inspection_id, runtime=inference.runtime,
+                                                    input=request.input, status=InferenceStatus.INCOMPATIBLE,
+                                                    error_code="MODEL_NOT_APPROVED")
+                else:
+                    inference = self._safe_infer(request)
                 inference_elapsed_ms = (time.perf_counter() - started) * 1000.0
                 # Health is evaluated for EVERY inspection, after inference, under the health lock:
                 # no cached report can authorize a conclusive result. Its duration is NOT part of
                 # latency_ms (contract: inference + decision; review R1-M2).
                 health_ok = self.refresh_health().ok
-                decision = self.decision.decide(inference, DecisionContext(self.state.state, health_ok))
+                decision = forced or self.decision.decide(inference, DecisionContext(self.state.state, health_ok))
+                if (quality is not None and not quality.envelope_validated
+                        and decision.result in (InspectionResult.PASS, InspectionResult.DEFECT)):
+                    # A provisional envelope never certifies an image for a conclusive result (QG-003).
+                    decision = Decision(InspectionResult.NO_DECISION, DecisionReason.INPUT_QUALITY,
+                                        detail="quality envelope provisional (not validated)",
+                                        latency_ms=decision.latency_ms)
                 latency_ms = inference_elapsed_ms + (decision.latency_ms or 0.0)
                 sequence = self._sequence + 1
 
                 def build(d: Decision) -> EventEnvelope:
                     return self.events.build(decision=d, inference=inference, session_id=session_id,
                                              captured_at_utc=captured, capture_sequence=sequence,
-                                             request_sha256=request_sha256, latency_ms=latency_ms)
+                                             request_sha256=request_sha256, latency_ms=latency_ms,
+                                             extra_detail=extra)
 
                 try:
                     envelope = build(decision)

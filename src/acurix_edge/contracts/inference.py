@@ -22,7 +22,11 @@ from acurix_edge.contracts.common import require_keys, utc_now_iso, validate_non
 from acurix_edge.contracts.errors import ContractError
 
 # 1.1 (AEX-CONTRACT-003): + completed_at_utc, software_version. Not persisted as a whole, so no 1.0 reader.
-INFERENCE_SCHEMA_VERSION = "1.1"
+# 1.2 (AEX-CV-007): + status INCONCLUSIVE; + Prediction.attributes (measurements such as an angle).
+INFERENCE_SCHEMA_VERSION = "1.2"
+AttributeValue = float | int | bool | str
+_ATTR_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+MAX_ATTRIBUTES = 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Caller-supplied identifier: ASCII only, bounded, no whitespace/control characters (R4-02).
 _INSPECTION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -36,6 +40,8 @@ class InferenceStatus(StrEnum):
     RUNTIME_ERROR = "RUNTIME_ERROR"
     INCOMPATIBLE = "INCOMPATIBLE"
     TIMEOUT = "TIMEOUT"
+    # The stage ran correctly but could not measure what it is for (e.g. label not found). Never conclusive.
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class ImageQuality(StrEnum):
@@ -128,15 +134,31 @@ class InputDescriptor:
         return cls(width=data["width"], height=data["height"], quality=quality)
 
 
+def _check_attributes(attrs: Any) -> None:
+    _require(isinstance(attrs, dict), "prediction attributes must be an object")
+    _require(len(attrs) <= MAX_ATTRIBUTES, f"at most {MAX_ATTRIBUTES} prediction attributes")
+    for key, value in attrs.items():
+        _require(isinstance(key, str) and bool(_ATTR_KEY_RE.fullmatch(key)), f"invalid attribute name {key!r}")
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            _require(math.isfinite(value), f"attribute {key} must be finite")
+        else:
+            _require(isinstance(value, str) and len(value) <= 200, f"attribute {key} must be number, bool or str")
+
+
 @dataclass(frozen=True, slots=True)
 class Prediction:
-    """Technical model output. `confidence` is NOT a calibrated probability."""
+    """Technical model output. `confidence` is a TECHNICAL confidence (DEC-004), NOT a probability.
+    `attributes`: named measurements of the prediction (e.g. `angle_deg`, `borderline`)."""
 
     class_id: str
     confidence: float
     bbox: tuple[float, float, float, float] | None = None
+    attributes: dict[str, AttributeValue] = field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
+        _check_attributes(self.attributes)
         _require(bool(self.class_id), "prediction class_id required")
         _require(
             isinstance(self.confidence, (int, float))
@@ -155,6 +177,7 @@ class Prediction:
             "class_id": self.class_id,
             "confidence": self.confidence,
             "bbox": list(self.bbox) if self.bbox is not None else None,
+            "attributes": dict(self.attributes),
         }
 
     @classmethod
@@ -164,6 +187,7 @@ class Prediction:
             class_id=str(data["class_id"]),
             confidence=data["confidence"],
             bbox=tuple(bbox) if bbox is not None else None,
+            attributes=dict(data.get("attributes") or {}),
         )
 
 

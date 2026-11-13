@@ -34,6 +34,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Inspection artifacts shipped with the software (verified by SHA-256 before use, CAS-005).
+acurix_edge = ["artifacts/*.json"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120

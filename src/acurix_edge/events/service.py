@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from acurix_edge.contracts.decision import Decision, InspectionResult
 from acurix_edge.contracts.errors import ErrorCode
@@ -119,7 +120,18 @@ class EventService:
         latency_ms: float,
         request_sha256: str,
         event_id: str | None = None,
+        extra_detail: dict[str, Any] | None = None,
     ) -> EventEnvelope:
+        """`extra_detail` (quality gate result, stage runs) is merged into `extra`; it cannot
+        override the base keys."""
+        extra: dict[str, Any] = dict(extra_detail or {})
+        extra.update({
+            "inference_error_code": inference.error_code,
+            "decision_detail": decision.detail,
+            "runtime": inference.runtime.to_dict(),
+            "inference_ms": inference.inference_ms,
+            "decision_ms": decision.latency_ms,
+        })
         return EventEnvelope(
             latency_ms=latency_ms,
             request_sha256=request_sha256,
@@ -145,13 +157,7 @@ class EventService:
             review_status=(ReviewStatus.PENDING if decision.result is InspectionResult.REVIEW
                            else ReviewStatus.NOT_REQUIRED),
             software_version=self._software_version,
-            extra={
-                "inference_error_code": inference.error_code,
-                "decision_detail": decision.detail,
-                "runtime": inference.runtime.to_dict(),
-                "inference_ms": inference.inference_ms,
-                "decision_ms": decision.latency_ms,
-            },
+            extra=extra,
         )
 
     def record(self, envelope: EventEnvelope) -> RecordResult:

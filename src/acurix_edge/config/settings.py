@@ -91,6 +91,65 @@ class CaptureConfig:
     reconnect_max_attempts: int = 10
 
 
+ARTIFACT_STATUSES = frozenset({"NOT_APPROVED"})  # the only status accepted in 0.3.0 (owner, 13/11/2026)
+ARTIFACT_KEYS = frozenset({"id", "version", "sha256", "path", "status"})
+DEFAULT_ARTIFACTS: tuple[dict[str, str], ...] = (
+    {"id": "label-skew-geometric", "version": "0.1.0",
+     "sha256": "3a17ec59b99baf866e4bb3fb5da41a211c8c05cfc590048183818715bbccf2cf",
+     "path": "label-skew-geometric-0.1.0.json", "status": "NOT_APPROVED"},
+)
+QUALITY_ENVELOPE_STATUSES = frozenset({"provisional"})  # "validated" only after the optical test + owner
+
+
+@dataclass(frozen=True, slots=True)
+class QualityConfig:
+    """Image quality envelope (QG-001..003), versioned. ALL VALUES PROVISIONAL (Ordem 4, 13/11/2026):
+    to be calibrated in the optical test (Anexo 04A §3.2) with the USB webcam. While `status` is
+    "provisional" the gate works but the envelope is never reported as validated.
+
+    ROI = product template, as fractions of the frame (resolution independent).
+    Exposure metrics use the whole frame; focus, reflection and position use the ROI."""
+
+    version: str = "0.1.0"
+    status: str = "provisional"
+    roi_x: float = 0.15
+    roi_y: float = 0.10
+    roi_w: float = 0.70
+    roi_h: float = 0.80
+    min_sharpness: float = 40.0          # variance of the Laplacian (8-bit gray) inside the ROI
+    min_brightness: float = 45.0         # mean gray of the frame
+    max_brightness: float = 210.0
+    dark_level: int = 15                 # a pixel <= dark_level is "crushed"
+    max_dark_fraction: float = 0.30
+    bright_level: int = 245              # a pixel >= bright_level is "blown"
+    max_bright_fraction: float = 0.15
+    specular_level: int = 250            # ROI pixel with ALL channels >= level = specular reflection
+    max_specular_fraction: float = 0.02
+    object_delta: float = 30.0           # |gray - background| above this = object pixel
+    min_object_fraction: float = 0.15    # object area / ROI area
+    max_object_fraction: float = 0.95    # object filling the ROI = framing wrong (too close)
+    background_level: float = 90.0       # expected gray of the template background (median of frame border)
+    background_tolerance: float = 40.0   # |border median - background_level| above this = wrong framing
+    max_border_outlier_fraction: float = 0.05  # border pixels off the background by > object_delta
+    border_inset_px: int = 3             # the border band is sampled this many px INSIDE the frame edge
+                                         # (cheap webcams often have a dead/colored edge row or column)
+    max_object_rotation_deg: float = 10.0  # product axis vs image axes (Anexo 04A §3.3: ±10°)
+
+
+def envelope_fingerprint(q: QualityConfig) -> tuple[str, str]:
+    """(version, sha256) of the quality envelope. Numbers are normalized to the field type, so
+    writing `40` or `40.0` in TOML yields the same sha (review L-a)."""
+    defaults = QualityConfig()
+    canonical: dict[str, Any] = {}
+    for f in fields(q):
+        v = getattr(q, f.name)
+        if isinstance(getattr(defaults, f.name), float) and isinstance(v, int) and not isinstance(v, bool):
+            v = float(v)
+        canonical[f.name] = v
+    digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return str(q.version), digest.hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ModelsConfig:
     """Model approval policy (ADR-016): default-deny.
@@ -103,6 +162,10 @@ class ModelsConfig:
 
     approved_models: tuple[Any, ...] = ()
     real_model_loading: bool = False
+    # INVENTORY ONLY (owner decision 13/11/2026, Ordem 4): known inspection artifacts with id,
+    # version, sha256 and path. It NEVER authorizes a load for decision nor a decision: approval
+    # comes only from `approved_models` (locked empty, ADR-016). Only status NOT_APPROVED is accepted.
+    artifacts: tuple[Any, ...] = field(default_factory=lambda: DEFAULT_ARTIFACTS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +180,7 @@ class AppConfig:
     models: ModelsConfig = field(default_factory=ModelsConfig)
     clock: ClockConfig = field(default_factory=ClockConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -141,6 +205,7 @@ _SECTIONS: dict[str, type[Any]] = {
     "models": ModelsConfig,
     "clock": ClockConfig,
     "capture": CaptureConfig,
+    "quality": QualityConfig,
 }
 _TOP_LEVEL = {"config_version", "site_id", "station_id", *_SECTIONS}
 
@@ -234,6 +299,8 @@ def validate(cfg: AppConfig) -> None:
             or not 0 <= tol <= CLOCK_TOLERANCE_MAX_S):
         p.append(f"clock.backward_tolerance_s must be a number in 0..{CLOCK_TOLERANCE_MAX_S:g} (seconds)")
     p.extend(_capture_problems(cfg.capture))
+    p.extend(_quality_problems(cfg.quality))
+    p.extend(_artifact_problems(m.artifacts))
     if p:
         raise ConfigError(p)
 
@@ -260,6 +327,80 @@ def _capture_problems(c: CaptureConfig) -> list[str]:
         p.append("capture.reconnect_interval_s must be a number in 0.01..60")
     if not _is_int(c.reconnect_max_attempts) or not 0 <= c.reconnect_max_attempts <= 1000:
         p.append("capture.reconnect_max_attempts must be int in 0..1000")
+    return p
+
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _frac(v: Any, lo: float = 0.0, hi: float = 1.0) -> bool:
+    return _is_num(v) and lo <= v <= hi
+
+
+def _quality_problems(q: QualityConfig) -> list[str]:
+    p: list[str] = []
+    if not isinstance(q.version, str) or not _VERSION_RE.fullmatch(q.version):
+        p.append("quality.version must be semantic version (x.y.z)")
+    if not _in(q.status, QUALITY_ENVELOPE_STATUSES):
+        p.append("quality.status must be 'provisional' in 0.3.0 (validated only after the optical test, "
+                 "Anexo 04A §3.2, and owner approval)")
+    roi_ok = all(_frac(v) for v in (q.roi_x, q.roi_y, q.roi_w, q.roi_h))
+    if not roi_ok or q.roi_w < 0.05 or q.roi_h < 0.05 or q.roi_x + q.roi_w > 1 or q.roi_y + q.roi_h > 1:
+        p.append("quality.roi_* must be fractions with roi_w, roi_h >= 0.05 and the ROI inside the frame")
+    if not _is_num(q.min_sharpness) or q.min_sharpness <= 0:
+        p.append("quality.min_sharpness must be a number > 0")
+    if not (_frac(q.min_object_fraction) and _frac(q.max_object_fraction)
+            and 0 < q.min_object_fraction < q.max_object_fraction):
+        p.append("quality: need 0 < min_object_fraction < max_object_fraction <= 1")
+    if not (_frac(q.background_level, 0, 255) and _frac(q.background_tolerance, 1, 255)):
+        p.append("quality.background_level must be in 0..255 and background_tolerance in 1..255")
+    if not _frac(q.max_border_outlier_fraction) or q.max_border_outlier_fraction <= 0:
+        p.append("quality.max_border_outlier_fraction must be a fraction in (0, 1]")
+    if not _is_int(q.border_inset_px) or not 0 <= q.border_inset_px <= 50:
+        p.append("quality.border_inset_px must be int in 0..50")
+    if not _frac(q.max_object_rotation_deg, 0.5, 45):
+        p.append("quality.max_object_rotation_deg must be a number in 0.5..45")
+    if not (_frac(q.min_brightness, 0, 255) and _frac(q.max_brightness, 0, 255)
+            and q.min_brightness < q.max_brightness):
+        p.append("quality.min_brightness < max_brightness, both in 0..255")
+    for name in ("dark_level", "bright_level", "specular_level"):
+        v = getattr(q, name)
+        if not _is_int(v) or not 0 <= v <= 255:
+            p.append(f"quality.{name} must be int in 0..255")
+    for name in ("max_dark_fraction", "max_bright_fraction", "max_specular_fraction", "min_object_fraction"):
+        if not _frac(getattr(q, name)):
+            p.append(f"quality.{name} must be a fraction in 0..1")
+    if not _frac(q.object_delta, 1, 255):
+        p.append("quality.object_delta must be a number in 1..255")
+    return p
+
+
+def _artifact_problems(artifacts: Any) -> list[str]:
+    """Inventory entries: exact keys, valid id/version/sha256/path, status NOT_APPROVED only."""
+    if not isinstance(artifacts, (list, tuple)):
+        return ["models.artifacts must be a list of tables"]
+    p: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for i, a in enumerate(artifacts):
+        where = f"models.artifacts[{i}]"
+        if not isinstance(a, dict) or set(a) != ARTIFACT_KEYS:
+            p.append(f"{where} must have exactly the keys {sorted(ARTIFACT_KEYS)}")
+            continue
+        if not isinstance(a["id"], str) or not _ID_RE.fullmatch(a["id"]):
+            p.append(f"{where}.id must match {_ID_RE.pattern}")
+        if not isinstance(a["version"], str) or not _VERSION_RE.fullmatch(a["version"]):
+            p.append(f"{where}.version must be semantic version")
+        if not isinstance(a["sha256"], str) or not _SHA256_HEX.fullmatch(a["sha256"]):
+            p.append(f"{where}.sha256 must be 64 lowercase hex chars")
+        if not _is_safe_relative(a["path"]) or "/" in a["path"] or "\\" in a["path"]:
+            p.append(f"{where}.path must be a plain file name inside the artifacts folder")
+        if not _in(a["status"], ARTIFACT_STATUSES):
+            p.append(f"{where}.status must be NOT_APPROVED: the inventory never approves "
+                     "(approval only via approved_models, ADR-016)")
+        key = (str(a["id"]), str(a["version"]))
+        if key in seen:
+            p.append(f"{where} duplicates {key[0]}@{key[1]}")
+        seen.add(key)
     return p
 
 

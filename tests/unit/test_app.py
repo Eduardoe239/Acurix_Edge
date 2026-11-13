@@ -441,7 +441,8 @@ class ApplicationTests(TempDirTestCase):
         actions = [(r["action"], r["target"]) for r in audit]
         self.assertIn(("STATE_TRANSITION", "IDLE->INITIALIZING"), actions)
         self.assertIn(("STATE_TRANSITION", "DEGRADED->IDLE"), actions)
-        seqs = [r["detail"]["seq"] for r in reversed(audit)]
+        # only state transitions carry `seq` (other audits, e.g. the QG-003 envelope record, do not)
+        seqs = [r["detail"]["seq"] for r in reversed(audit) if r["action"].startswith("STATE_TRANSITION")]
         self.assertEqual(seqs, sorted(seqs))
         with self.assertRaises(SessionError):
             a.close_session()
@@ -461,7 +462,8 @@ class ApplicationTests(TempDirTestCase):
         self.assertIsNone(st["inference"]["model"])
         names = {c["component"] for c in st["components"]}
         self.assertEqual(names, {"database", "storage", "models", "camera", "clock"})
-        self.assertEqual({c["component"] for c in st["resources"]}, {"memory", "cpu", "gpu", "queue", "decision_rule"})
+        self.assertEqual({c["component"] for c in st["resources"]},
+                         {"memory", "cpu", "gpu", "queue", "decision_rule", "quality_envelope"})
         json.dumps(st)
 
     # -- CLI ------------------------------------------------------------------

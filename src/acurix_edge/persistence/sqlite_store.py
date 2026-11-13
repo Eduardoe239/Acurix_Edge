@@ -840,6 +840,29 @@ class SqliteEventStore:
             detail = {"undecodable": True}
         return {"action": row[0], "target": row[1], "detail": detail}
 
+    def last_audit_with_action(self, actions: tuple[str, ...], target: str | None = None) -> dict[str, Any] | None:
+        """Most recent audit entry whose action is one of `actions` (and, if given, whose target
+        equals `target`). Read-only query."""
+        if not actions or not all(isinstance(a, str) and a for a in actions):
+            raise ValueError("actions must be non-empty strings")
+        marks = ",".join("?" for _ in actions)
+        where = f"action IN ({marks})" + (" AND target = ?" if target is not None else "")
+        params: tuple[str, ...] = actions + ((target,) if target is not None else ())
+        with self._lock:
+            try:
+                row = self._c().execute(
+                    f"SELECT action, target, detail_json FROM audit_entry WHERE {where}"
+                    " ORDER BY audit_id DESC LIMIT 1", params).fetchone()
+            except sqlite3.Error as exc:
+                raise self._err("read failed", exc) from exc
+        if row is None:
+            return None
+        try:
+            detail = json.loads(row[2])
+        except ValueError:
+            detail = {"undecodable": True}
+        return {"action": row[0], "target": row[1], "detail": detail}
+
     def list_audit(self, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= MAX_PAGE:
             raise ValueError(f"limit must be 1..{MAX_PAGE}")
