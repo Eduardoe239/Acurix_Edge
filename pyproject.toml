@@ -18,5 +18,53 @@ dependencies = [
 [project.scripts]
 acurix-edge = "acurix_edge.__main__:main"
 
+# Development-only tools (NFR-014, owner decision 13/11/2026). PEP 735 group: NOT part of the
+# product's dependencies or distribution metadata. Transitive pins of mypy listed for reproducibility.
+[dependency-groups]
+dev = [
+    "ruff==0.17.4",
+    "mypy==2.4.1",
+    "mypy_extensions==1.2.0",
+    "typing_extensions==4.16.0",
+    "pathspec==1.1.1",
+    "librt==0.16.0",
+    "ast-serialize==0.13.1",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+# Readability preferences, not defects: explicit try/except/pass, if/else blocks, nested `if`
+# with per-branch comments and nested `with` in tests are kept as written.
+ignore = ["SIM102", "SIM105", "SIM108", "SIM117"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["acurix_edge", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+
+# Tests: strict except annotating every test function (that would rewrite the suite).
+# Function bodies are still type-checked (check_untyped_defs). Disabled codes, tests only:
+# - arg-type / call-arg: negative tests pass wrong types ON PURPOSE to prove contracts reject them;
+# - union-attr: Optional results read after the test already asserted success;
+# - method-assign: deliberate monkeypatching of methods (failure injection).
+[[tool.mypy.overrides]]
+module = ["tests", "tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = true
+disable_error_code = ["arg-type", "call-arg", "union-attr", "method-assign"]

@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import unittest
+from typing import Any
 
 from acurix_edge.observability.logging import REDACTED, bind_context, configure_logging, redact
 
@@ -90,7 +91,7 @@ class LoggingTests(unittest.TestCase):
             self.assertEqual(out[k], REDACTED, k)
 
     def test_redact_depth_limited(self):
-        deep: dict = {}
+        deep: dict[str, Any] = {}
         cur = deep
         for _ in range(20):
             cur["n"] = {}

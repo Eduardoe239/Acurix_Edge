@@ -110,6 +110,8 @@ def _add_capture_parsers(sub: Any) -> None:
     c.add_argument("--focus", default="NOT_RECORDED", help="recorded only; the tool does not set the camera")
     c.add_argument("--pose", default="")
     c.add_argument("--notes", default="")
+    c.add_argument("--device-label", default=None,
+                   help="camera.device in the manifest (default: source id, e.g. webcam-usb-0)")
     c.add_argument("--base-dir", type=Path, default=Path.cwd())
     v = sub.add_parser("capture-verify", help="validate a session manifest and re-hash its files")
     v.add_argument("--session-dir", type=Path, required=True)
@@ -139,7 +141,8 @@ def _capture(args: argparse.Namespace) -> int:
     configure_logging("WARNING")
     try:
         result = capture_session(source, args.base_dir.resolve() / "datasets" / "local", params,
-                                 frames=args.frames, interval_s=args.interval_s, session_id=args.session_id)
+                                 frames=args.frames, interval_s=args.interval_s, session_id=args.session_id,
+                                 device_label=args.device_label)
     except BenchError as exc:
         print(json.dumps({"error": "CAPTURE_REFUSED", "problems": exc.problems}, ensure_ascii=False),
               file=sys.stderr)

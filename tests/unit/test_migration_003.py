@@ -5,9 +5,11 @@
 """
 
 import hashlib
+import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from acurix_edge.app import Application
@@ -18,12 +20,12 @@ from acurix_edge.health.checks import ClockCheck
 from acurix_edge.health.service import ComponentStatus as C
 from acurix_edge.persistence import sqlite_store
 from acurix_edge.persistence.sqlite_store import (
+    _MIGRATIONS,
     IMMUTABILITY_TRIGGER,
     INVALID_BACKUP_SUFFIX,
     SCHEMA_VERSION,
     PersistenceError,
     SqliteEventStore,
-    _MIGRATIONS,
 )
 from tests.support import (
     FIXTURE_POLICY,
@@ -135,7 +137,7 @@ class Migration3Tests(TempDirTestCase):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 return node.value
             if isinstance(node, ast.JoinedStr):
-                return "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values)
+                return "".join(cast(str, v.value) if isinstance(v, ast.Constant) else "{}" for v in node.values)
             if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
                 left, right = text(node.left), text(node.right)
                 return None if left is None and right is None else (left or "{}") + (right or "{}")
@@ -145,7 +147,7 @@ class Migration3Tests(TempDirTestCase):
         for node in ast.walk(ast.parse(source)):
             t = text(node)
             if t is not None:
-                out.append((node.lineno, t))
+                out.append((getattr(node, "lineno", 0), t))
         return out
 
     def test_r3_m1_no_replace_or_update_of_events_in_product_code(self):
@@ -204,7 +206,8 @@ class Migration3Tests(TempDirTestCase):
         copy.parent.mkdir()
         src, dst = sqlite3.connect(original), sqlite3.connect(copy)
         src.backup(dst)
-        src.close(), dst.close()
+        src.close()
+        dst.close()
         c = SqliteEventStore(copy)
         c.open()
         self.assertEqual((c.schema_version(), c.check()[0]), (3, True))
@@ -249,12 +252,12 @@ class Migration3Tests(TempDirTestCase):
 class _FailingBackupConn(sqlite3.Connection):
     exc: BaseException = sqlite3.OperationalError("injected failure during copy")
 
-    def backup(self, *a, **k):  # type: ignore[override]
+    def backup(self, *a, **k):
         raise type(self).exc
 
 
 class _BadVerdictConn(sqlite3.Connection):
-    def execute(self, sql, *args):  # type: ignore[override]
+    def execute(self, sql, *args):
         if "quick_check" in sql:
             return super().execute("SELECT 'page 3: corrupt'")
         return super().execute(sql, *args)
@@ -268,7 +271,7 @@ def patch_connect(src_factory=None, target_factory=None):
         factory = src_factory if k.get("uri") else target_factory
         return real(database, *a, **({**k, "factory": factory} if factory else k))
 
-    return mock.patch.object(sqlite_store.sqlite3, "connect", side_effect=fake)
+    return mock.patch.object(sqlite3, "connect", side_effect=fake)
 
 
 class RestoreFindingsTests(TempDirTestCase):
@@ -454,7 +457,7 @@ class RestoreFindingsTests(TempDirTestCase):
         f = self.tmp / "u.db"
         f.write_bytes(b"ours")
         st = f.stat()
-        with mock.patch.object(sqlite_store.os, "rename", side_effect=PermissionError("locked by AV")):
+        with mock.patch.object(os, "rename", side_effect=PermissionError("locked by AV")):
             msg = SqliteEventStore._quarantine_backup(f, (st.st_dev, st.st_ino))
         self.assertIn("deleted (rename failed)", msg)
         self.assertFalse(f.exists())
@@ -471,7 +474,7 @@ class RestoreFindingsTests(TempDirTestCase):
             return st_ if len(calls) == 1 else mock.Mock(st_dev=-1, st_ino=-1)
 
         gst = g.stat()
-        with mock.patch.object(sqlite_store.os, "rename", side_effect=PermissionError("locked")), \
+        with mock.patch.object(os, "rename", side_effect=PermissionError("locked")), \
                 mock.patch.object(Path, "stat", stat_then_swapped):
             msg = SqliteEventStore._quarantine_backup(g, (gst.st_dev, gst.st_ino))
         self.assertIn("left untouched", msg)
@@ -494,7 +497,7 @@ class RestoreFindingsTests(TempDirTestCase):
 
     def test_r3_be_journal_mode_switch_refused_is_an_error(self):
         class StuckInWal(sqlite3.Connection):
-            def execute(self, sql, *args):  # type: ignore[override]
+            def execute(self, sql, *args):
                 if "journal_mode" in sql:
                     return super().execute("SELECT 'wal'")
                 return super().execute(sql, *args)
@@ -566,7 +569,7 @@ class ClockConfigTests(TempDirTestCase):
         cfg = AppConfig() if tolerance is None else _build({"clock": {"backward_tolerance_s": tolerance}})
         store = SqliteEventStore(cfg.database_path(self.tmp))
         clock = ClockCheck(backward_tolerance_s=cfg.clock.backward_tolerance_s,
-                           now=lambda: datetime.now(timezone.utc) + offset[0],
+                           now=lambda: datetime.now(UTC) + offset[0],
                            last_event_utc=store.last_event_persisted_utc)
         a = Application(cfg, self.tmp, model_policy=FIXTURE_POLICY, inference=FixtureOkAdapter(),
                         rule=FixtureApprovedRule(), capture_probe=lambda: (C.OK, "fixture"), store=store,
@@ -581,7 +584,7 @@ class ClockConfigTests(TempDirTestCase):
         a.start_session()
         a.process(request())
         last = datetime.fromisoformat(a.store.last_event_persisted_utc()[:-1] + "+00:00")
-        offset[0] = (last - datetime.now(timezone.utc)) - timedelta(seconds=1.0)  # ~1 s behind last event
+        offset[0] = (last - datetime.now(UTC)) - timedelta(seconds=1.0)  # ~1 s behind last event
         with self.assertLogs("acurix_edge.health.clock", "WARNING"):
             st = a.status()
         clock = next(c for c in st["components"] if c["component"] == "clock")
@@ -595,7 +598,7 @@ class ClockConfigTests(TempDirTestCase):
         a.start_session()
         a.process(request())
         last = datetime.fromisoformat(a.store.last_event_persisted_utc()[:-1] + "+00:00")
-        offset[0] = (last - datetime.now(timezone.utc)) - timedelta(seconds=3.0)
+        offset[0] = (last - datetime.now(UTC)) - timedelta(seconds=3.0)
         a.refresh_health()
         self.assertIs(a.state.state, SystemState.FAULT)
 
@@ -605,7 +608,7 @@ class ClockConfigTests(TempDirTestCase):
         a.start_session()
         a.process(request())
         last = datetime.fromisoformat(a.store.last_event_persisted_utc()[:-1] + "+00:00")
-        offset[0] = (last - datetime.now(timezone.utc)) - timedelta(seconds=3.0)  # > 2 s but < 5 s
+        offset[0] = (last - datetime.now(UTC)) - timedelta(seconds=3.0)  # > 2 s but < 5 s
         with self.assertLogs("acurix_edge.health.clock", "WARNING"):
             a.refresh_health()
         self.assertIs(a.state.state, SystemState.OBSERVING)

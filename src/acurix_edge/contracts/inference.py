@@ -15,7 +15,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from acurix_edge import __version__
 from acurix_edge.contracts.common import require_keys, utc_now_iso, validate_non_empty_str, validate_utc
@@ -65,16 +65,19 @@ class ModelRef:
             isinstance(self.id, str) and bool(self.id) and isinstance(self.version, str) and bool(self.version),
             "model id/version must be non-empty strings",
         )
-        _require(bool(isinstance(self.sha256, str) and _SHA256_RE.fullmatch(self.sha256)), "model sha256 must be 64 lowercase hex chars")
+        _require(bool(isinstance(self.sha256, str) and _SHA256_RE.fullmatch(self.sha256)),
+                 "model sha256 must be 64 lowercase hex chars")
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "version": self.version, "sha256": self.sha256}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ModelRef":
+    def from_dict(cls, data: dict[str, Any]) -> ModelRef:
         if not isinstance(data, dict):
             raise ContractError("model must be an object")
-        return cls(id=data.get("id"), version=data.get("version"), sha256=data.get("sha256"))  # no str() coercion
+        # No str() coercion: wrong types (or None) are rejected by __post_init__; the casts are static only.
+        return cls(id=cast(str, data.get("id")), version=cast(str, data.get("version")),
+                   sha256=cast(str, data.get("sha256")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +94,7 @@ class RuntimeRef:
         return {"name": self.name, "version": self.version, "device": self.device}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RuntimeRef":
+    def from_dict(cls, data: dict[str, Any]) -> RuntimeRef:
         return cls(name=str(data["name"]), version=str(data["version"]), device=str(data["device"]))
 
 
@@ -117,7 +120,7 @@ class InputDescriptor:
         return {"width": self.width, "height": self.height, "quality": self.quality.value}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "InputDescriptor":
+    def from_dict(cls, data: dict[str, Any]) -> InputDescriptor:
         try:
             quality = ImageQuality(data["quality"])
         except ValueError as exc:
@@ -155,12 +158,12 @@ class Prediction:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Prediction":
+    def from_dict(cls, data: dict[str, Any]) -> Prediction:
         bbox = data.get("bbox")
         return cls(
             class_id=str(data["class_id"]),
             confidence=data["confidence"],
-            bbox=tuple(bbox) if bbox is not None else None,  # type: ignore[arg-type]
+            bbox=tuple(bbox) if bbox is not None else None,
         )
 
 
@@ -263,7 +266,7 @@ class InferenceResult:
              "status", "error_code", "completed_at_utc", "software_version")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "InferenceResult":
+    def from_dict(cls, data: dict[str, Any]) -> InferenceResult:
         require_keys(data, cls._KEYS, "inference")
         try:
             status = InferenceStatus(data["status"])

@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from acurix_edge.contracts.errors import ErrorCode
@@ -38,7 +38,7 @@ from acurix_edge.health.service import CheckResult, ComponentStatus, host_memory
 log = logging.getLogger("acurix_edge.health.clock")
 
 ADR014_MIN_FREE_RAM_MB = 1536
-CLOCK_FLOOR_UTC = datetime(2026, 11, 1, tzinfo=timezone.utc)
+CLOCK_FLOOR_UTC = datetime(2026, 11, 1, tzinfo=UTC)
 GPU_CACHE_S = 30.0
 GPU_TIMEOUT_S = 3.0
 
@@ -78,7 +78,7 @@ class ClockCheck:
     (`clock.backward_tolerance_s`), never from a constant in code."""
 
     def __init__(self, *, backward_tolerance_s: float,
-                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 now: Callable[[], datetime] = lambda: datetime.now(UTC),
                  last_event_utc: Callable[[], str | None] = lambda: None) -> None:
         if isinstance(backward_tolerance_s, bool) or not isinstance(backward_tolerance_s, (int, float)) \
                 or not 0 <= backward_tolerance_s < float("inf"):
@@ -140,7 +140,7 @@ class CpuCheck:
         if sys.platform != "win32":
             return None
         idle, kernel, user = ctypes.c_ulonglong(), ctypes.c_ulonglong(), ctypes.c_ulonglong()
-        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel),  # type: ignore[attr-defined]
+        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel),  # type: ignore[attr-defined,unused-ignore]
                                                      ctypes.byref(user)):
             return None
         return idle.value, kernel.value, user.value
@@ -163,7 +163,7 @@ class CpuCheck:
 
 class GpuCheck:
     def __init__(self, which: Callable[[str], str | None] = shutil.which,
-                 run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+                 run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._which, self._run, self._clock = which, run, clock
         self._cache: tuple[float, CheckResult] | None = None

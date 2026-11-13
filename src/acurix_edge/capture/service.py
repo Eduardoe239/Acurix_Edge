@@ -18,6 +18,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -194,7 +195,7 @@ class CaptureService:
             self._stop = stop = threading.Event()
             self._buffer = buffer = FrameBuffer(
                 self.config.queue_max_frames, self.config.drop_alarm_threshold, drop_oldest=self.source.live,
-                on_alarm=lambda c, sid=session_id: self._alarm(c, sid))
+                on_alarm=functools.partial(self._alarm, session_id=session_id))
             stamper = FrameStamper(self.source.source_id, monotonic_ns=self._mono_ns)
             pending, self._pending = self._pending, None
             self._state, self._detail = CaptureState.RUNNING, f"capturing for session {session_id}"

@@ -10,7 +10,7 @@ import io
 import json
 import re
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 
 import cv2
@@ -37,7 +37,7 @@ from tests.support import TempDirTestCase
 
 PARAMS = BenchParams(sku="SKU-PET-01", unit_id="PET-01-u3", provisional_label="LABEL_SKEWED",
                      lighting_setup="luz-A-difusa-45", lighting_ambient="janela-fechada", pose="p2")
-FIXED_NOW = lambda: datetime(2026, 11, 20, 13, 5, 0, tzinfo=timezone.utc)  # noqa: E731
+FIXED_NOW = lambda: datetime(2026, 11, 20, 13, 5, 0, tzinfo=UTC)  # noqa: E731
 REQUIRED_CLI = {"--sku": "SKU-PET-01", "--unit-id": "PET-01-u3", "--label": "OK", "--lighting": "luz-A"}
 
 
@@ -78,7 +78,7 @@ class BenchCaptureTests(BenchCase):
         self.assertEqual(data["camera"]["resolution"], "64x48")
         self.assertEqual(data["lighting"], {"setup": "luz-A-difusa-45", "ambient": "janela-fechada"})
         self.assertEqual([f["file"] for f in data["frames"]], ["000001.png", "000002.png", "000003.png"])
-        for entry, original in zip(data["frames"], self.originals):
+        for entry, original in zip(data["frames"], self.originals, strict=False):  # 3 written of 4 originals
             path = r.session_dir / entry["file"]
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), entry["sha256"])
             decoded = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
@@ -265,6 +265,7 @@ class ManifestValidationTests(BenchCase):
 class CliTests(BenchCase):
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
+        code: int | str | None
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 code = main(list(args))
@@ -318,6 +319,19 @@ class CliTests(BenchCase):
         code, _, err = self.cli(*self.base(), "--session-id", "bench-s1")
         self.assertEqual(code, 2)
         self.assertTrue(re.search("never overwritten", err))
+
+    def test_cli_device_label_recorded_in_manifest(self):
+        code, out, err = self.cli(*self.base(), "--session-id", "lbl-1", "--device-label",
+                                  "Integrated Camera (embutida, teste tecnico)")
+        self.assertEqual(code, 0, err)
+        data = verify_session(self.root / "lbl-1")
+        self.assertEqual(data["camera"]["device"], "Integrated Camera (embutida, teste tecnico)")
+        code, _, _ = self.cli(*self.base(), "--session-id", "lbl-2", "--device-label", "x" * 201)
+        self.assertEqual(code, 2)  # invalid label refused before anything is created
+        self.assertNotIn("lbl-2", self.session_dirs())
+        code, _, _ = self.cli(*self.base(), "--session-id", "lbl-3", "--device-label", "")
+        self.assertEqual(code, 2)  # explicit empty label is refused, never silently replaced
+        self.assertNotIn("lbl-3", self.session_dirs())
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ NOOP_ADAPTER_ID = NoOpInferenceAdapter.adapter_id
 class ModelPolicy:
     approved_models: frozenset[ModelRef] = field(default_factory=frozenset)
     real_model_loading: bool = False
-    allowed_adapters: frozenset[type] = field(default_factory=lambda: frozenset({NoOpInferenceAdapter}))
+    allowed_adapters: frozenset[type[Any]] = field(default_factory=lambda: frozenset({NoOpInferenceAdapter}))
 
     def __post_init__(self) -> None:
         # Structure is validated strictly: a str/list/dict would make `in` checks lie
@@ -56,7 +56,7 @@ class ModelPolicy:
                 raise ValueError(f"adapter class {cls.__name__} has no class-level adapter_id")
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "ModelPolicy":
+    def from_config(cls, cfg: Any) -> ModelPolicy:
         """Product policy. Config validation guarantees an empty list and loading disabled in 0.1.0."""
         m = cfg.models
         if not isinstance(m.approved_models, (list, tuple)) or len(m.approved_models) != 0:
@@ -79,7 +79,8 @@ class ModelPolicy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "policy": "DEFAULT_DENY",
-            "approved_models": sorted((m.to_dict() for m in self.approved_models), key=lambda d: (d["id"], d["version"])),
+            "approved_models": sorted((m.to_dict() for m in self.approved_models),
+                                      key=lambda d: (d["id"], d["version"])),
             "real_model_loading": self.real_model_loading,
             "allowed_adapters": sorted(c.adapter_id for c in self.allowed_adapters),
         }

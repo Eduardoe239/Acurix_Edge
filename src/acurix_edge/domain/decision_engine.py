@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, replace
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeGuard, runtime_checkable
 
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.inference import ImageQuality, InferenceResult, InferenceStatus
@@ -37,14 +37,16 @@ class DecisionRule(Protocol):
     def evaluate(self, inference: InferenceResult) -> Decision: ...
 
 
-def is_rule_approved(rule: object | None) -> bool:
+def is_rule_approved(rule: object | None) -> TypeGuard[DecisionRule]:
     """Strict check: `approved` must be the boolean True (not merely truthy)."""
-    return (
-        rule is not None
-        and getattr(rule, "approved", False) is True
-        and isinstance(getattr(rule, "rule_id", None), str) and bool(getattr(rule, "rule_id"))
-        and isinstance(getattr(rule, "rule_version", None), str) and bool(getattr(rule, "rule_version"))
-    )
+    # Same short-circuit order as before: identity attributes are only read for an approved rule.
+    if rule is None or getattr(rule, "approved", False) is not True:
+        return False
+    rule_id = getattr(rule, "rule_id", None)
+    if not (isinstance(rule_id, str) and bool(rule_id)):
+        return False
+    rule_version = getattr(rule, "rule_version", None)
+    return isinstance(rule_version, str) and bool(rule_version)
 
 
 def _no_decision(reason: DecisionReason, detail: str) -> Decision:
@@ -71,14 +73,15 @@ class DecisionEngine:
         if not ctx.health_ok:
             return _no_decision(DecisionReason.HEALTH_NOT_OK, "health not OK")
         if inference.status is not InferenceStatus.OK or inference.model is None:
-            return _no_decision(DecisionReason.INFERENCE_NOT_OK, f"inference status {inference.status} ({inference.error_code})")
+            return _no_decision(DecisionReason.INFERENCE_NOT_OK,
+                                f"inference status {inference.status} ({inference.error_code})")
         if inference.input.quality is not ImageQuality.VALID:
             return _no_decision(DecisionReason.INPUT_QUALITY, f"input quality {inference.input.quality}")
         rule = self._rule
         if not is_rule_approved(rule):
             return _no_decision(DecisionReason.NO_APPROVED_RULE, "no approved decision rule (use case NOT_FROZEN)")
         try:
-            decision = rule.evaluate(inference)
+            decision: object = rule.evaluate(inference)  # a rule may violate its signature: checked below
         except Exception as exc:
             log.exception("decision rule failed", extra={"code": "DECISION_RULE_ERROR"})
             return _no_decision(DecisionReason.RULE_ERROR, type(exc).__name__)

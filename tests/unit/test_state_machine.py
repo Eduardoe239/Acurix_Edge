@@ -1,10 +1,13 @@
 import itertools
 import unittest
+from typing import Any
 
 from acurix_edge.domain.state_machine import (
     ALLOWED_TRANSITIONS,
     InvalidTransition,
     StateMachine,
+)
+from acurix_edge.domain.state_machine import (
     SystemState as S,
 )
 
@@ -66,7 +69,7 @@ class StateMachineTests(unittest.TestCase):
                 self.assertIs(sm.state, S.FAULT)
 
     def test_listener_receives_rejections_and_failures_do_not_corrupt(self):
-        seen = []
+        seen: list[Any] = []
         sm = StateMachine()
         sm.subscribe(lambda rec: (_ for _ in ()).throw(RuntimeError("listener bug")))
         sm.subscribe(seen.append)

@@ -9,16 +9,16 @@ import re
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from acurix_edge.__main__ import main
-from acurix_edge.app import FAULT_LATCH_FILE, SessionError
+from acurix_edge.app import SessionError
 from acurix_edge.domain.state_machine import SystemState
 from acurix_edge.health.service import ComponentStatus
 from acurix_edge.observability import logging as obs
 from acurix_edge.observability.logging import MAX_REDACT_CHARS, redact
 from tests.unit.test_r4_regressions import AppCase
-
 
 # -- R5-05: redaction must be linear in the input length ---------------------------------
 # Pre-fix patterns (verbatim), used only as a coverage oracle: the fix must never redact less.
@@ -32,7 +32,7 @@ _OLD_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]
 _ADVERSARIAL = ("a-", "_a", "a.", "a+", "x-pwd", "a-token", "x_http", "eyJ-", "eyJa-", "eyJ_", "eyJ-a.")
 
 
-def _masked(pattern: re.Pattern, s: str, secret_span) -> set[int]:
+def _masked(pattern: re.Pattern[str], s: str, secret_span) -> set[int]:
     """Character indexes of s that a rule masks (the secret part of each match)."""
     out: set[int] = set()
     for m in pattern.finditer(s):
@@ -112,8 +112,9 @@ class RedactionComplexityTests(unittest.TestCase):
 
 # -- I-01 + latch test gaps --------------------------------------------------------------
 class LatchSessionIdTests(AppCase):
-    def latch_data(self) -> dict:
-        return json.loads(self.latch.read_text(encoding="utf-8"))
+    def latch_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = json.loads(self.latch.read_text(encoding="utf-8"))
+        return data
 
     def test_fault_during_start_latch_carries_attempted_session_id(self):
         a = self.app()

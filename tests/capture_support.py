@@ -12,11 +12,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 
 W, H = 64, 48
 
 
-def synth_image(i: int, w: int = W, h: int = H) -> np.ndarray:
+def synth_image(i: int, w: int = W, h: int = H) -> npt.NDArray[np.uint8]:
     """Deterministic BGR image: background shade + a rectangle and a circle placed by `i`."""
     img = np.full((h, w, 3), (40 + 7 * i) % 200, dtype=np.uint8)
     x = 4 + (i * 5) % max(1, w - 24)
@@ -25,7 +26,7 @@ def synth_image(i: int, w: int = W, h: int = H) -> np.ndarray:
     return img
 
 
-def write_image_folder(folder: Path, n: int, **kw: int) -> list[np.ndarray]:
+def write_image_folder(folder: Path, n: int, **kw: int) -> list[npt.NDArray[np.uint8]]:
     folder.mkdir(parents=True, exist_ok=True)
     images = [synth_image(i, **kw) for i in range(n)]
     for i, img in enumerate(images):
@@ -37,7 +38,7 @@ def write_image_folder(folder: Path, n: int, **kw: int) -> list[np.ndarray]:
 
 def write_video(path: Path, n: int, fps: float = 10.0) -> None:
     """MJPG/AVI is encoded by OpenCV itself (no external codec)."""
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter.fourcc(*"MJPG"), fps, (W, H))
     assert writer.isOpened(), "OpenCV MJPG writer unavailable"
     for i in range(n):
         writer.write(synth_image(i))
@@ -75,7 +76,7 @@ class SyntheticCamera:
         self._stall.clear()
         self._unstall.set()
 
-    def factory(self, _target: object, *_args: object) -> "_Cap":
+    def factory(self, _target: object, *_args: object) -> _Cap:
         with self.lock:
             self.opens += 1
         return _Cap(self)
@@ -93,7 +94,7 @@ class _Cap:
     def set(self, _prop: int, _value: float) -> bool:
         return True
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
+    def read(self) -> tuple[bool, npt.NDArray[np.uint8] | None]:
         cam = self.cam
         if cam._stall.is_set():
             cam._unstall.wait(5.0)

@@ -18,7 +18,7 @@ import json
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 MANIFEST_SCHEMA = "1.0"
 MANIFEST_FILE = "manifest.json"
@@ -153,4 +153,4 @@ def verify_session(session_dir: Path) -> dict[str, Any]:
         problems.append(f"files not in manifest: {unlisted}")
     if problems:
         raise ManifestError(problems)
-    return data
+    return cast(dict[str, Any], data)  # shape guaranteed by validate_manifest above

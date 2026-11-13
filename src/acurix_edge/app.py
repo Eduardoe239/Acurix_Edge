@@ -40,7 +40,7 @@ from acurix_edge.config.settings import AppConfig
 from acurix_edge.contracts.capture import CapturedFrame
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.errors import ContractError, ErrorCode
-from acurix_edge.contracts.events import validate_utc, utc_now_iso
+from acurix_edge.contracts.events import EventEnvelope, utc_now_iso, validate_utc
 from acurix_edge.contracts.inference import (
     InferenceAdapter,
     InferenceRequest,
@@ -249,7 +249,7 @@ class Application:
         def decision_rule() -> CheckResult:
             rule = self.decision.rule
             if is_rule_approved(rule):
-                return ComponentStatus.OK, f"{rule.rule_id}@{rule.rule_version}"  # type: ignore[union-attr]
+                return ComponentStatus.OK, f"{rule.rule_id}@{rule.rule_version}"
             return ComponentStatus.DEGRADED, "no approved decision rule (use case NOT_FROZEN)"
 
         def camera() -> CheckResult:
@@ -547,10 +547,12 @@ class Application:
             )
 
         try:
-            result = self.inference.infer(request)
+            # typed as object: an adapter may violate its signature; that is checked below at runtime
+            result: object = self.inference.infer(request)
             expected_model = self.inference.model
         except Exception as exc:
-            log.error("inference adapter raised", extra={"code": "INFERENCE_EXCEPTION", "ctx": {"error": type(exc).__name__}})
+            log.error("inference adapter raised",
+                      extra={"code": "INFERENCE_EXCEPTION", "ctx": {"error": type(exc).__name__}})
             return failure(InferenceStatus.RUNTIME_ERROR, f"ADAPTER_EXCEPTION:{type(exc).__name__}")
         if not isinstance(result, InferenceResult):
             return failure(InferenceStatus.INCOMPATIBLE, "ADAPTER_INVALID_RETURN_TYPE")
@@ -630,18 +632,23 @@ class Application:
                 # latency_ms (contract: inference + decision; review R1-M2).
                 health_ok = self.refresh_health().ok
                 decision = self.decision.decide(inference, DecisionContext(self.state.state, health_ok))
-                build = dict(inference=inference, session_id=session_id, captured_at_utc=captured,
-                             capture_sequence=self._sequence + 1, request_sha256=request_sha256,
-                             latency_ms=inference_elapsed_ms + (decision.latency_ms or 0.0))
+                latency_ms = inference_elapsed_ms + (decision.latency_ms or 0.0)
+                sequence = self._sequence + 1
+
+                def build(d: Decision) -> EventEnvelope:
+                    return self.events.build(decision=d, inference=inference, session_id=session_id,
+                                             captured_at_utc=captured, capture_sequence=sequence,
+                                             request_sha256=request_sha256, latency_ms=latency_ms)
+
                 try:
-                    envelope = self.events.build(decision=decision, **build)
+                    envelope = build(decision)
                 except Exception as exc:
                     # Untraceable/invalid decision or payload: record NO_DECISION instead of losing it.
                     log.error("decision not representable; recording NO_DECISION",
                               extra={"code": "DECISION_CONTRACT_ERROR", "ctx": {"error": type(exc).__name__}})
                     decision = Decision(InspectionResult.NO_DECISION, DecisionReason.RULE_ERROR,
                                         detail="decision violated event contract")
-                    envelope = self.events.build(decision=decision, **build)
+                    envelope = build(decision)
                 self._sequence += 1
                 record = self.events.record(envelope)
                 if not record.persisted:

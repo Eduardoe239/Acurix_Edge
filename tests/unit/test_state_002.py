@@ -12,7 +12,8 @@ from acurix_edge.domain.state_machine import (
     ALLOWED_TRANSITIONS,
     RESULT_CAPABLE_STATES,
     InvalidTransition,
-    StateMachine,
+)
+from acurix_edge.domain.state_machine import (
     SystemState as S,
 )
 from tests.support import FIXTURE_POLICY, FixtureApprovedRule, TempDirTestCase, ok_result

@@ -189,12 +189,12 @@ class PersistenceTests(TempDirTestCase):
         s = self.store()
         self._raw_pass_insert(s)  # fully traceable row is accepted
         for i, field in enumerate(("model_id", "model_version", "model_sha256", "rule_id", "rule_version")):
-            with self.subTest(field=field):
-                with self.assertRaises(sqlite3.IntegrityError):
-                    self._raw_pass_insert(s, event_id=f"e{i}", inspection_id=f"i{i}", capture_sequence=10 + i,
-                                          **{field: None})
+            with self.subTest(field=field), self.assertRaises(sqlite3.IntegrityError):
+                self._raw_pass_insert(s, event_id=f"e{i}", inspection_id=f"i{i}", capture_sequence=10 + i,
+                                      **{field: None})
         with self.assertRaises(sqlite3.IntegrityError):
-            self._raw_pass_insert(s, event_id="ex", inspection_id="ix", capture_sequence=99, inference_status="NO_MODEL")
+            self._raw_pass_insert(s, event_id="ex", inspection_id="ix", capture_sequence=99,
+                                  inference_status="NO_MODEL")
 
     def test_unique_inspection_and_sequence_per_session(self):
         s = self.store()

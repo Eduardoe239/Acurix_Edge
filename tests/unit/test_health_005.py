@@ -7,8 +7,9 @@ database unavailable -> FAULT; output shaped as the OpenAPI Health/Status schema
 import re
 import subprocess
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 from acurix_edge.app import Application
 from acurix_edge.config.settings import AppConfig, StorageConfig
@@ -22,7 +23,8 @@ from acurix_edge.health.checks import (
     GpuCheck,
     memory_check,
 )
-from acurix_edge.health.service import OPENAPI_COMPONENTS, ComponentStatus as C, HealthService
+from acurix_edge.health.service import OPENAPI_COMPONENTS, HealthService
+from acurix_edge.health.service import ComponentStatus as C
 from tests.support import (
     FIXTURE_POLICY,
     HEALTHY_HOST,
@@ -36,12 +38,19 @@ OPENAPI = Path(__file__).resolve().parents[2] / "docs" / "02-architecture" / "ap
 TOL = AppConfig().clock.backward_tolerance_s  # 2.0 s by configuration default (owner, Ordem 2.1)
 
 
+def _const(value):
+    return lambda: value
+
+
 def fixed(status, detail="injected", code=None):
     return (lambda: (status, detail, code)) if code else (lambda: (status, detail))
 
 
+_CAMERA_OK = fixed(C.OK)  # module-level default (same single evaluation as before)
+
+
 class HealthyAppCase(TempDirTestCase):
-    def app(self, *, host=None, camera=fixed(C.OK), rule=True, inference=True, config=None) -> Application:
+    def app(self, *, host=None, camera=_CAMERA_OK, rule=True, inference=True, config=None) -> Application:
         a = Application(config or AppConfig(), self.tmp, model_policy=FIXTURE_POLICY,
                         inference=FixtureOkAdapter() if inference else None,
                         rule=FixtureApprovedRule() if rule else None,
@@ -151,7 +160,7 @@ class ProbeUnitTests(unittest.TestCase):
         # Clock problems other than "behind the last event" are DEGRADED + AEX-CLK-001.
         before_floor = ClockCheck(backward_tolerance_s=TOL, now=lambda: CLOCK_FLOOR_UTC - timedelta(days=1))
         self.assertEqual(before_floor()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
-        t = [datetime(2026, 11, 10, tzinfo=timezone.utc)]
+        t = [datetime(2026, 11, 10, tzinfo=UTC)]
         clock = ClockCheck(backward_tolerance_s=TOL, now=lambda: t[0])
         self.assertEqual(clock(), (C.OK, "UTC clock plausible"))
         t[0] -= timedelta(seconds=30)
@@ -168,7 +177,7 @@ class ProbeUnitTests(unittest.TestCase):
         self.assertEqual(ClockCheck(backward_tolerance_s=TOL, now=broken)()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
         naive = ClockCheck(backward_tolerance_s=TOL, now=lambda: datetime(2026, 11, 10))
         self.assertEqual(naive()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
-        bad_last = ClockCheck(backward_tolerance_s=TOL, now=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc),
+        bad_last = ClockCheck(backward_tolerance_s=TOL, now=lambda: datetime(2026, 11, 10, tzinfo=UTC),
                               last_event_utc=lambda: "x")
         self.assertEqual(bad_last()[0::2], (C.DEGRADED, ErrorCode.CLK_001))
 
@@ -176,19 +185,19 @@ class ProbeUnitTests(unittest.TestCase):
         # Owner decision (Ordem 2.1): up to 2 s behind the last event -> tolerated + logged
         # (OK, state unchanged, code AEX-CLK-001); more than 2 s -> FAULT.
         last = "2026-11-10T12:00:02.000Z"
-        base = datetime(2026, 11, 10, 12, 0, 2, tzinfo=timezone.utc)
+        base = datetime(2026, 11, 10, 12, 0, 2, tzinfo=UTC)
         for behind_s, status in ((1.9, C.OK), (2.0, C.OK), (2.1, C.FAULT)):
             with self.subTest(behind_s=behind_s):
                 now = base - timedelta(seconds=behind_s)
-                check = ClockCheck(backward_tolerance_s=TOL, now=lambda now=now: now, last_event_utc=lambda: last)
+                check = ClockCheck(backward_tolerance_s=TOL, now=_const(now), last_event_utc=lambda: last)
                 if status is C.OK:
                     with self.assertLogs("acurix_edge.health.clock", "WARNING") as cm:
                         result = check()
-                    self.assertEqual(cm.records[0].code, "AEX-CLK-001")
+                    self.assertEqual(getattr(cm.records[0], "code", None), "AEX-CLK-001")
                     self.assertIn("tolerated", result[1])
                 else:
                     result = check()
-                self.assertEqual((result[0], result[2]), (status, ErrorCode.CLK_001))
+                self.assertEqual((result[0], cast(tuple[Any, ...], result)[2]), (status, ErrorCode.CLK_001))
         same = ClockCheck(backward_tolerance_s=TOL, now=lambda: base, last_event_utc=lambda: last)
         self.assertEqual(same(), (C.OK, "UTC clock plausible"))  # not behind: no code, no log
         zero = ClockCheck(backward_tolerance_s=0, now=lambda: base - timedelta(milliseconds=1),

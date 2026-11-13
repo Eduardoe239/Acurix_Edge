@@ -7,10 +7,12 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from typing import cast
 
 import cv2
 import numpy as np
 
+from acurix_edge.capture.sources import Image
 from acurix_edge.contracts.capture import CapturedFrame, CaptureStatus, FrameQualityMetrics
 from acurix_edge.contracts.common import utc_now_iso
 from acurix_edge.contracts.inference import MAX_IMAGE_SIDE, ImageQuality, InputDescriptor
@@ -20,7 +22,7 @@ class InvalidImageError(ValueError):
     """The source delivered something that is not a usable 8-bit image."""
 
 
-def check_image(image: object) -> np.ndarray:
+def check_image(image: object) -> Image:
     if not isinstance(image, np.ndarray):
         raise InvalidImageError(f"image must be numpy.ndarray, got {type(image).__name__}")
     if image.dtype != np.uint8:
@@ -32,19 +34,19 @@ def check_image(image: object) -> np.ndarray:
     h, w = image.shape[:2]
     if not (0 < h <= MAX_IMAGE_SIDE and 0 < w <= MAX_IMAGE_SIDE):
         raise InvalidImageError(f"image size {w}x{h} outside 1..{MAX_IMAGE_SIDE}")
-    return image
+    return cast(Image, image)  # dtype uint8 checked above
 
 
-def _gray(image: np.ndarray) -> np.ndarray:
+def _gray(image: Image) -> Image:
     if image.ndim == 2:
         return image
     channels = image.shape[2]
     if channels == 1:
         return image[:, :, 0]
-    return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY if channels == 4 else cv2.COLOR_BGR2GRAY)
+    return cast(Image, cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY if channels == 4 else cv2.COLOR_BGR2GRAY))
 
 
-def quality_metrics(image: np.ndarray) -> FrameQualityMetrics:
+def quality_metrics(image: Image) -> FrameQualityMetrics:
     """Mean brightness (0..255) and variance of the Laplacian (simple sharpness)."""
     gray = _gray(check_image(image))
     brightness = float(gray.mean())

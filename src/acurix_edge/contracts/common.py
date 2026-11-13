@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from acurix_edge.contracts.errors import ContractError
@@ -19,7 +19,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def validate_utc(ts: Any, name: str = "captured_at_utc") -> None:

@@ -8,6 +8,7 @@ every contract, explicit UNKNOWN/NO_DECISION, NoOp only yields NO_DECISION.
 import json
 import unittest
 import uuid
+from typing import Any
 
 from acurix_edge import __version__
 from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
@@ -46,7 +47,7 @@ def decision(**kw) -> Decision:
 
 
 # (factory of a valid object, deserializer, current schema version)
-CONTRACTS = {
+CONTRACTS: dict[str, tuple[Any, Any, str]] = {
     "frame": (frame, CapturedFrame.from_dict, CAPTURE_SCHEMA_VERSION),
     "inference": (ok_result, InferenceResult.from_dict, INFERENCE_SCHEMA_VERSION),
     "decision": (decision, Decision.from_dict, DECISION_SCHEMA_VERSION),
@@ -58,8 +59,9 @@ LATENCY_KEY = {"frame": "capture_latency_ms", "inference": "inference_ms", "deci
                "event": "latency_ms"}
 
 
-def wire(obj) -> dict:
-    return json.loads(json.dumps(obj.to_dict()))
+def wire(obj) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(json.dumps(obj.to_dict()))
+    return data
 
 
 class CommonContractTests(unittest.TestCase):
@@ -101,7 +103,7 @@ class CommonContractTests(unittest.TestCase):
                         load(d)
 
     def test_invalid_values_are_rejected(self):
-        cases = {
+        cases: dict[str, list[dict[str, Any]]] = {
             "frame": [{"captured_at_utc": "2026-11-10 12:00"}, {"capture_latency_ms": -1}, {"sequence": -1},
                       {"frame_id": "x"}, {"status": "FINE"}, {"software_version": ""}, {"monotonic_ns": -1},
                       {"monotonic_ns": 1.5}, {"quality_metrics": None},
@@ -203,7 +205,7 @@ class NoOpOnlyNoDecisionTests(unittest.TestCase):
 
 
 class EventVersioningTests(unittest.TestCase):
-    def legacy_dict(self) -> dict:
+    def legacy_dict(self) -> dict[str, Any]:
         d = wire(make_event())
         d["schema_version"] = "1.0"
         d.pop("latency_ms")
@@ -223,9 +225,8 @@ class EventVersioningTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             EventEnvelope.from_dict(d)
         for key in ("latency_ms", "request_sha256"):
-            with self.subTest(key=key):
-                with self.assertRaises(ContractError):
-                    make_event(**{key: None})
+            with self.subTest(key=key), self.assertRaises(ContractError):
+                make_event(**{key: None})
 
 
 class ErrorCatalogTests(unittest.TestCase):

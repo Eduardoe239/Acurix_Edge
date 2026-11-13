@@ -7,6 +7,7 @@ import logging
 import math
 import sqlite3
 import unittest
+from typing import Any
 from unittest import mock
 
 from acurix_edge.__main__ import main
@@ -19,7 +20,6 @@ from acurix_edge.contracts.inference import ImageQuality, InferenceRequest, Inpu
 from acurix_edge.domain.model_policy import ModelPolicy
 from acurix_edge.domain.state_machine import InvalidTransition, StateMachine, SystemState
 from acurix_edge.observability.logging import MAX_ITEMS, MAX_REDACT_CHARS, configure_logging, redact
-from acurix_edge.persistence import sqlite_store
 from acurix_edge.persistence.sqlite_store import CorruptRecordError, PersistenceError, SqliteEventStore
 from tests.support import (
     FIXTURE_MODEL,
@@ -43,7 +43,8 @@ class Probe:
 class AppCase(TempDirTestCase):
     def app(self, **kw) -> Application:
         cfg = kw.pop("config", AppConfig())
-        kw.setdefault("model_policy", fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
+        kw.setdefault("model_policy",
+                      fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
         kw.setdefault("host_checks", HEALTHY_HOST)
         a = Application(cfg, self.tmp, **kw)
         a.boot()
@@ -193,8 +194,13 @@ class FaultLatchApplicationTests(AppCase):
     def test_cli_status_reports_latch_and_reset_fault_releases_it(self):
         root = logging.getLogger("acurix_edge")
         saved = (list(root.handlers), root.propagate, root.level)
-        self.addCleanup(lambda: (root.handlers.clear(), root.handlers.extend(saved[0]),
-                                 setattr(root, "propagate", saved[1]), root.setLevel(saved[2])))
+        def restore() -> None:
+            root.handlers.clear()
+            root.handlers.extend(saved[0])
+            root.propagate = saved[1]
+            root.setLevel(saved[2])
+
+        self.addCleanup(restore)
         base = str(self.tmp)
         self.assertEqual(self.run_cli("init", "--base-dir", base)[0], 0)
         self.latch.write_text(json.dumps({"reason": "PRIOR_FAULT", "at_utc": "x"}), encoding="utf-8")
@@ -253,7 +259,7 @@ class DuplicateAndCorruptTests(AppCase):
         self.assertEqual(again.record.outcome.value, "DUPLICATE")
         c = a.events.counters()
         self.assertEqual((c.inspection_duplicates, c.created, c.persisted), (1, 1, 1))
-        self.assertTrue(any("INSPECTION_DUPLICATE" == getattr(r, "code", None) for r in cm.records))
+        self.assertTrue(any(getattr(r, "code", None) == "INSPECTION_DUPLICATE" for r in cm.records))
 
     def test_event_level_duplicate_is_logged(self):
         a = self.observing()
@@ -263,7 +269,7 @@ class DuplicateAndCorruptTests(AppCase):
             rec = a.events.record(envelope)
         self.assertEqual(rec.outcome.value, "DUPLICATE")
         self.assertEqual(a.events.counters().duplicates, 1)
-        self.assertTrue(any("EVENT_DUPLICATE" == getattr(r, "code", None) for r in cm.records))
+        self.assertTrue(any(getattr(r, "code", None) == "EVENT_DUPLICATE" for r in cm.records))
 
     def corrupt(self, a: Application, event_id: str, payload: str) -> None:
         tamper_event_row(a.store._c(), "UPDATE inspection_event SET payload_json = ? WHERE event_id = ?",
@@ -321,8 +327,8 @@ class CorrelationTests(AppCase):
 
     def test_failed_start_audit_carries_attempted_session_id(self):
         a = self.app()
-        a.health.register("forced", lambda: (__import__("acurix_edge.health.service", fromlist=["x"]).ComponentStatus.FAULT,
-                                             "forced"), critical=True)
+        fault = __import__("acurix_edge.health.service", fromlist=["x"]).ComponentStatus.FAULT
+        a.health.register("forced", lambda: (fault, "forced"), critical=True)
         with self.assertRaises(SessionError):
             a.start_session()
         rows = [r for r in a.store.list_audit() if r["action"] == "STATE_TRANSITION"]
@@ -351,7 +357,7 @@ class DecisionConfidenceTests(unittest.TestCase):
 
 # -- R4-06 ------------------------------------------------------------------------
 class _BadCheckConnection(sqlite3.Connection):
-    def execute(self, sql, *args):  # type: ignore[override]
+    def execute(self, sql, *args):
         if "quick_check" in sql:
             return super().execute("SELECT 'row 1 missing from index'")
         return super().execute(sql, *args)
@@ -364,7 +370,7 @@ class InvalidBackupTests(TempDirTestCase):
         self.addCleanup(s.close)
         dest = self.tmp / "bk" / "copy.sqlite"
         real_connect = sqlite3.connect
-        with mock.patch.object(sqlite_store.sqlite3, "connect",
+        with mock.patch.object(sqlite3, "connect",
                                side_effect=lambda p, *a, **k: real_connect(p, factory=_BadCheckConnection)):
             with self.assertRaises(PersistenceError) as cm:
                 s.backup(dest)
@@ -384,7 +390,7 @@ class InvalidBackupTests(TempDirTestCase):
 # -- R4-09 ------------------------------------------------------------------------
 class AllowlistTests(TempDirTestCase):
     def test_policy_structure_validated(self):
-        bad = (
+        bad: tuple[dict[str, Any], ...] = (
             dict(approved_models=[FIXTURE_MODEL]),
             dict(approved_models="x"),
             dict(approved_models=frozenset({"id@1"})),

@@ -99,7 +99,7 @@ HEALTHY_HOST = {"clock": _fixture_host("OK"), "memory": _fixture_host("OK"), "cp
                 "gpu": _fixture_host("DISABLED")}
 
 
-def tamper_event_row(conn, sql: str, params: tuple = ()) -> None:
+def tamper_event_row(conn, sql: str, params: tuple[object, ...] = ()) -> None:
     """Simulates EXTERNAL corruption/tampering of inspection_event (R4-03 tests). Since migration 3
     the database aborts any UPDATE; someone with raw write access to the file can still drop the
     trigger, which is exactly what this does before re-creating it."""

@@ -7,6 +7,7 @@ import dataclasses
 import threading
 import time
 import unittest
+from typing import Any
 from unittest import mock
 
 from acurix_edge.app import Application, SessionError
@@ -32,11 +33,11 @@ def wait_until(predicate, timeout=3.0, step=0.01) -> bool:
         if predicate():
             return True
         time.sleep(step)
-    return predicate()
+    return bool(predicate())
 
 
 def invariant_holds(c) -> bool:
-    return c.captured == c.delivered + c.dropped + c.depth
+    return bool(c.captured == c.delivered + c.dropped + c.depth)
 
 
 class FrameBufferTests(unittest.TestCase):
@@ -45,7 +46,7 @@ class FrameBufferTests(unittest.TestCase):
         return [stamper.stamp(synth_image(i), 0.0) for i in range(n)]
 
     def test_live_drop_oldest_is_counted_and_alarm_fires_once(self):
-        alarms = []
+        alarms: list[Any] = []
         buf = FrameBuffer(3, 2, drop_oldest=True, on_alarm=alarms.append)
         fs = self.frames(10)
         for f in fs:
@@ -115,7 +116,7 @@ class CaptureAppCase(TempDirTestCase):
         a.boot()
         self.addCleanup(a.shutdown)
         self.addCleanup(self.cam.unstall)  # never leave a fake read blocked
-        self.transitions = []
+        self.transitions: list[Any] = []
         a.state.subscribe(lambda r: self.transitions.append((time.monotonic(), r)))
         return a
 

@@ -10,8 +10,9 @@ import json
 import re
 import sqlite3
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from acurix_edge.app import Application, SessionError
 from acurix_edge.config.settings import AppConfig
@@ -20,12 +21,12 @@ from acurix_edge.domain.state_machine import SystemState
 from acurix_edge.health.checks import ClockCheck
 from acurix_edge.health.service import ComponentStatus as C
 from acurix_edge.persistence.sqlite_store import (
+    _MIGRATIONS,
     AUDIT_GENESIS_SHA256,
     EXPECTED_TABLES,
     SCHEMA_VERSION,
     PersistenceError,
     SqliteEventStore,
-    _MIGRATIONS,
     audit_entry_sha256,
 )
 from tests.support import (
@@ -53,7 +54,7 @@ def _normalize(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).replace("( ", "(").replace(" )", ")").strip()
 
 
-def event_rows(path: Path) -> list[tuple]:
+def event_rows(path: Path) -> list[tuple[Any, ...]]:
     c = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         return c.execute("SELECT * FROM inspection_event ORDER BY event_id").fetchall()
@@ -89,7 +90,7 @@ class MigrationTextTests(unittest.TestCase):
 
 
 class Migration1To2Tests(TempDirTestCase):
-    def make_v1(self, path: Path) -> tuple[list[tuple], int]:
+    def make_v1(self, path: Path) -> tuple[list[tuple[Any, ...]], int]:
         """A v1 database with events (incl. a legacy 1.0-era layout) and legacy audit rows."""
         s = V1Store(path)
         s.open()
@@ -120,7 +121,8 @@ class Migration1To2Tests(TempDirTestCase):
         copy.parent.mkdir()
         src, dst = sqlite3.connect(original), sqlite3.connect(copy)
         src.backup(dst)
-        src.close(), dst.close()
+        src.close()
+        dst.close()
         sc = self.migrate(copy)
         self.assertEqual(sc.schema_version(), SCHEMA_VERSION)  # 1 -> 2 -> 3 in one open
         self.assertEqual(sc.check(), (True, f"schema {SCHEMA_VERSION}"))
@@ -139,7 +141,7 @@ class Migration1To2Tests(TempDirTestCase):
         for e in s.list_events():  # payloads still decode and match their stored SHA-256
             self.assertIsNotNone(e.event_id)
         tables = {r[0] for r in s._c().execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue(MIGRATION_2_TABLES <= tables and EXPECTED_TABLES <= tables)
+        self.assertTrue(tables >= MIGRATION_2_TABLES and tables >= EXPECTED_TABLES)
         self.assertEqual(s._c().execute("PRAGMA foreign_key_check").fetchall(), [])
         self.assertTrue(s.integrity_check())
 
@@ -183,13 +185,13 @@ class Migration1To2Tests(TempDirTestCase):
 class AuditChainTests(TempDirTestCase):
     def store_with_chain(self, legacy: int = 2, chained: int = 4) -> SqliteEventStore:
         path = self.tmp / "c.db"
-        s = V1Store(path)
-        s.open()
+        v1 = V1Store(path)
+        v1.open()
         for i in range(legacy):
-            s._c().execute("INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json,"
-                           " correlation_id) VALUES (?,?,?,?,?,NULL)",
-                           (f"2026-11-02T00:00:0{i}.000Z", "system", "LEGACY", "x", "{}"))
-        s.close()
+            v1._c().execute("INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json,"
+                            " correlation_id) VALUES (?,?,?,?,?,NULL)",
+                            (f"2026-11-02T00:00:0{i}.000Z", "system", "LEGACY", "x", "{}"))
+        v1.close()
         s = SqliteEventStore(path)
         s.open()
         self.addCleanup(s.close)
@@ -198,7 +200,8 @@ class AuditChainTests(TempDirTestCase):
         return s
 
     def rows(self, s):
-        return s._c().execute("SELECT audit_id, prev_sha256, entry_sha256 FROM audit_entry ORDER BY audit_id").fetchall()
+        return s._c().execute(
+            "SELECT audit_id, prev_sha256, entry_sha256 FROM audit_entry ORDER BY audit_id").fetchall()
 
     def test_chain_links_legacy_prefix_and_new_entries(self):
         s = self.store_with_chain()
@@ -209,12 +212,12 @@ class AuditChainTests(TempDirTestCase):
         self.assertIsNone(rows[0][1])  # legacy rows are never rewritten
         # First chained entry commits to the legacy prefix (recomputed with the same formula).
         p = AUDIT_GENESIS_SHA256
-        for audit_id, occurred, actor, action, target, detail, corr in s._c().execute(
+        for _audit_id, occurred, actor, action, target, detail, corr in s._c().execute(
                 "SELECT audit_id, occurred_at_utc, actor_ref, action, target, detail_json, correlation_id"
                 " FROM audit_entry ORDER BY audit_id LIMIT 2"):
             p = audit_entry_sha256(p, occurred, actor, action, target, detail, corr)
         self.assertEqual(rows[2][1], p)
-        for prev_row, row in zip(rows[2:], rows[3:]):
+        for prev_row, row in zip(rows[2:], rows[3:], strict=False):  # lengths differ by design
             self.assertEqual(row[1], prev_row[2])
         self.assertEqual(rep.tip_sha256, rows[-1][2])
 
@@ -248,11 +251,11 @@ class AuditChainTests(TempDirTestCase):
 
     def test_append_refuses_to_extend_a_broken_legacy_prefix(self):
         path = self.tmp / "l.db"
-        s = V1Store(path)
-        s.open()
-        s._c().execute("INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json)"
-                       " VALUES (?,?,?,?,?)", ("t", "a", "b", "c", "{}"))
-        s.close()
+        v1 = V1Store(path)
+        v1.open()
+        v1._c().execute("INSERT INTO audit_entry (occurred_at_utc, actor_ref, action, target, detail_json)"
+                        " VALUES (?,?,?,?,?)", ("t", "a", "b", "c", "{}"))
+        v1.close()
         s = SqliteEventStore(path)
         s.open()
         self.addCleanup(s.close)
@@ -334,7 +337,7 @@ class ClockRuleTests(TempDirTestCase):
 
     def test_clock_before_last_persisted_event_is_fault_latched(self):
         offset = [timedelta(0)]
-        a = self.app(lambda: datetime.now(timezone.utc) + offset[0])
+        a = self.app(lambda: datetime.now(UTC) + offset[0])
         a.start_session()
         self.assertIs(a.state.state, SystemState.OBSERVING)
         self.assertEqual(a.process(request()).result, "PASS")  # fixture: all pre-conditions met
@@ -355,11 +358,11 @@ class ClockRuleTests(TempDirTestCase):
         self.assertIs(a.state.state, SystemState.IDLE)
 
     def test_fault_survives_restart_via_persisted_last_event(self):
-        a = self.app(lambda: datetime.now(timezone.utc))
+        a = self.app(lambda: datetime.now(UTC))
         a.start_session()
         a.process(request())
         a.shutdown()
-        b = self.app(lambda: datetime.now(timezone.utc) - timedelta(days=1))  # booted with a wrong clock
+        b = self.app(lambda: datetime.now(UTC) - timedelta(days=1))  # booted with a wrong clock
         with self.assertRaises(SessionError):  # start re-evaluates health: clock FAULT -> refused
             b.start_session()
         self.assertIs(b.state.state, SystemState.FAULT)
@@ -367,7 +370,7 @@ class ClockRuleTests(TempDirTestCase):
 
     def test_other_clock_problems_degrade_and_block_observing(self):
         cases = {
-            "before floor": lambda: datetime(2020, 1, 1, tzinfo=timezone.utc),
+            "before floor": lambda: datetime(2020, 1, 1, tzinfo=UTC),
             "unreadable": lambda: (_ for _ in ()).throw(OSError("rtc")),
         }
         for name, now in cases.items():
@@ -384,7 +387,7 @@ class ClockRuleTests(TempDirTestCase):
                     f.unlink()
 
     def test_backward_jump_without_events_is_degraded_until_caught_up(self):
-        t = [datetime.now(timezone.utc)]
+        t = [datetime.now(UTC)]
         a = self.app(lambda: t[0])
         self.assertEqual(self.clock_entry(a)["status"], "OK")
         t[0] -= timedelta(minutes=5)

@@ -77,9 +77,8 @@ class EventContractTests(unittest.TestCase):
                 {**CONCLUSIVE_OK, "result": result, "model": {"id": "m", "version": "1"}},
             ]
         for kw in bad:
-            with self.subTest(kw=kw):
-                with self.assertRaises(ContractError):
-                    make(**kw)
+            with self.subTest(kw=kw), self.assertRaises(ContractError):
+                make(**kw)
 
     def test_from_dict_malformed(self):
         for mutate in (
@@ -90,9 +89,8 @@ class EventContractTests(unittest.TestCase):
         ):
             d = json.loads(make().canonical_json())
             mutate(d)
-            with self.subTest(d=d):
-                with self.assertRaises(ContractError):
-                    EventEnvelope.from_dict(d)
+            with self.subTest(d=d), self.assertRaises(ContractError):
+                EventEnvelope.from_dict(d)
 
     def test_caller_mutation_does_not_change_envelope(self):
         cfg = dict(CFG)

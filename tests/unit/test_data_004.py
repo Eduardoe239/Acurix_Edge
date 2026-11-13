@@ -6,7 +6,6 @@ SQLITE_FULL error path; nothing fills the host disk.
 
 import io
 import json
-import logging
 import re
 import sqlite3
 import uuid
@@ -18,12 +17,12 @@ from acurix_edge.contracts.inference import InferenceRequest, InputDescriptor
 from acurix_edge.domain.state_machine import SystemState
 from acurix_edge.observability.logging import configure_logging
 from acurix_edge.persistence.sqlite_store import (
+    _MIGRATIONS,
     INVALID_BACKUP_SUFFIX,
     AppendOutcome,
     IdempotencyConflict,
     PersistenceError,
     SqliteEventStore,
-    _MIGRATIONS,
 )
 from tests.support import FIXTURE_POLICY, TempDirTestCase, request
 from tests.unit.test_persistence import env

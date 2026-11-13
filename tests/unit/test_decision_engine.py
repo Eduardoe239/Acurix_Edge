@@ -4,7 +4,7 @@ from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
 from acurix_edge.contracts.decision import Decision, DecisionReason, InspectionResult
 from acurix_edge.contracts.errors import ContractError
 from acurix_edge.contracts.inference import ImageQuality
-from acurix_edge.domain.decision_engine import DecisionContext, DecisionEngine
+from acurix_edge.domain.decision_engine import DecisionContext, DecisionEngine, is_rule_approved
 from acurix_edge.domain.state_machine import SystemState
 from tests.support import FixtureApprovedRule, ok_result, request
 
@@ -88,6 +88,27 @@ class DecisionGuardTests(unittest.TestCase):
                     Decision(result, DecisionReason.NO_APPROVED_RULE)
                 with self.assertRaises(ContractError):
                     Decision(result, DecisionReason.RULE_APPLIED, rule_id="x")
+
+
+class RuleApprovalShortCircuitTests(unittest.TestCase):
+    def test_unapproved_rule_identity_is_never_read(self):
+        """NFR-014 review LOW-1: approval is checked first; a broken identity of an UNAPPROVED rule
+        must not raise (result stays NO_APPROVED_RULE)."""
+
+        class Broken:
+            approved = False
+
+            @property
+            def rule_id(self):
+                raise RuntimeError("must not be read")
+
+            rule_version = "1"
+
+        self.assertFalse(is_rule_approved(Broken()))
+        self.assertFalse(is_rule_approved(None))
+        d = DecisionEngine(Broken()).decide(ok_result(), OBS_OK)
+        self.assertIs(d.reason, DecisionReason.NO_APPROVED_RULE)
+        self.assertTrue(is_rule_approved(FixtureApprovedRule()))
 
 
 if __name__ == "__main__":

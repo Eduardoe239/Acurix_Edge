@@ -12,7 +12,7 @@ import json
 import math
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -133,7 +133,7 @@ class AppConfig:
         return {"version": self.config_version, "sha256": self.sha256}
 
 
-_SECTIONS: dict[str, type] = {
+_SECTIONS: dict[str, type[Any]] = {
     "storage": StorageConfig,
     "api": ApiConfig,
     "logging": LoggingConfig,
@@ -178,7 +178,7 @@ def _build(data: dict[str, Any]) -> AppConfig:
         if not isinstance(raw, dict):
             problems.append(f"[{name}] must be a table")
             continue
-        allowed = set(cls.__dataclass_fields__)
+        allowed = {f.name for f in fields(cls)}
         extra = set(raw) - allowed
         if extra:
             problems.append(f"unknown keys in [{name}]: {sorted(extra)}")
@@ -211,7 +211,8 @@ def validate(cfg: AppConfig) -> None:
     s = cfg.storage
     if not isinstance(s.data_dir, str) or not _is_safe_relative(s.data_dir):
         p.append("storage.data_dir must be a relative path without '..'")
-    if not isinstance(s.database_file, str) or not _is_safe_relative(s.database_file) or "/" in s.database_file or "\\" in s.database_file:
+    if (not isinstance(s.database_file, str) or not _is_safe_relative(s.database_file)
+            or "/" in s.database_file or "\\" in s.database_file):
         p.append("storage.database_file must be a plain file name")
     if not isinstance(s.min_free_disk_mb, int) or isinstance(s.min_free_disk_mb, bool) or s.min_free_disk_mb < 0:
         p.append("storage.min_free_disk_mb must be int >= 0")

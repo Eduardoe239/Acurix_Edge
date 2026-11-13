@@ -41,7 +41,8 @@ class ConfigTests(TempDirTestCase):
         with self.assertRaises(ConfigError) as ctx:
             load_config(bad)
         joined = " ".join(ctx.exception.problems)
-        for frag in ("config_version", "site_id", "bind_host", "api.port", "data_dir", "inference.adapter", "logging.level"):
+        for frag in ("config_version", "site_id", "bind_host", "api.port", "data_dir", "inference.adapter",
+                     "logging.level"):
             self.assertIn(frag, joined)
 
     def test_rejects_unknown_keys(self):
@@ -52,33 +53,29 @@ class ConfigTests(TempDirTestCase):
 
     def test_rejects_absolute_and_drive_paths(self):
         for value in ("C:/data", "/abs", "a/../../b"):
-            with self.subTest(value=value):
-                with self.assertRaises(ConfigError):
-                    load_config(self.write(f'[storage]\ndata_dir = "{value}"\n'))
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                load_config(self.write(f'[storage]\ndata_dir = "{value}"\n'))
         with self.assertRaises(ConfigError):
             load_config(self.write('[storage]\ndatabase_file = "sub/x.db"\n'))
 
     def test_loopback_literals_only(self):
         self.assertEqual(load_config(self.write('[api]\nbind_host = "::1"\n')).api.bind_host, "::1")
         for host in ("localhost", "0.0.0.0", "192.168.0.10"):
-            with self.subTest(host=host):
-                with self.assertRaises(ConfigError):
-                    load_config(self.write(f'[api]\nbind_host = "{host}"\n'))
+            with self.subTest(host=host), self.assertRaises(ConfigError):
+                load_config(self.write(f'[api]\nbind_host = "{host}"\n'))
 
     def test_rejects_unc_drive_relative_and_reserved_names(self):
         for value in ("\\\\\\\\server\\\\share", "C:rel", "NUL", "data/con.txt", "LPT1"):
-            with self.subTest(value=value):
-                with self.assertRaises(ConfigError):
-                    load_config(self.write(f'[storage]\ndata_dir = "{value}"\n'))
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                load_config(self.write(f'[storage]\ndata_dir = "{value}"\n'))
         with self.assertRaises(ConfigError):
             load_config(self.write('[storage]\ndatabase_file = "nul.db"\n'))
 
     def test_non_string_values_are_config_errors_not_crashes(self):
         for text in ('[api]\nbind_host = ["127.0.0.1"]\n', '[logging]\nlevel = {a = 1}\n',
                      '[inference]\nadapter = ["noop"]\n', 'site_id = 5\n', '[storage]\ndata_dir = 1\n'):
-            with self.subTest(text=text):
-                with self.assertRaises(ConfigError):
-                    load_config(self.write(text))
+            with self.subTest(text=text), self.assertRaises(ConfigError):
+                load_config(self.write(text))
 
     def test_directory_as_config_path(self):
         with self.assertRaises(ConfigError):
@@ -97,9 +94,8 @@ class ConfigTests(TempDirTestCase):
             '[inference]\nadapter = "onnx"\n',
         )
         for text in bad:
-            with self.subTest(text=text):
-                with self.assertRaises(ConfigError):
-                    load_config(self.write(text))
+            with self.subTest(text=text), self.assertRaises(ConfigError):
+                load_config(self.write(text))
         ok = load_config(self.write('[models]\napproved_models = []\nreal_model_loading = false\n'))
         self.assertEqual(len(ok.models.approved_models), 0)
 

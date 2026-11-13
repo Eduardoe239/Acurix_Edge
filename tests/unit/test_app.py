@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+from typing import Any, cast
 
 from acurix_edge.__main__ import main
 from acurix_edge.app import Application, SessionError
@@ -34,7 +35,8 @@ class ApplicationTests(TempDirTestCase):
     def app(self, **kw) -> Application:
         cfg = kw.pop("config", AppConfig())
         # Test adapter subclasses are registered explicitly in the (test-only) policy seam.
-        kw.setdefault("model_policy", fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
+        kw.setdefault("model_policy",
+                      fixture_policy_with(type(kw["inference"])) if "inference" in kw else FIXTURE_POLICY)
         kw.setdefault("host_checks", HEALTHY_HOST)
         a = Application(cfg, self.tmp, **kw)
         a.boot()
@@ -124,7 +126,7 @@ class ApplicationTests(TempDirTestCase):
 
     def test_truthy_non_bool_approval_is_not_approval(self):
         rule = FixtureApprovedRule()
-        rule.approved = "yes"
+        rule.approved = cast(Any, "yes")  # truthy non-bool on purpose
         a, _ = self.observing_app(rule=rule)
         self.assertIs(a.state.state, SystemState.DEGRADED)
         self.assertEqual(a.process(request()).reason, "SYSTEM_NOT_OBSERVING")
@@ -249,7 +251,7 @@ class ApplicationTests(TempDirTestCase):
                 return super().infer(req)
 
         a, _ = self.observing_app(inference=Blocking())
-        results = {}
+        results: dict[str, Any] = {}
         worker = threading.Thread(target=lambda: results.setdefault("o", a.process(request())))
         worker.start()
         self.assertTrue(started.wait(5))  # inspection is in flight

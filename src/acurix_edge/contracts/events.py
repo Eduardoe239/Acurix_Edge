@@ -95,7 +95,8 @@ class EventEnvelope:
         elif self.latency_ms is not None or self.request_sha256 is not None:
             raise ContractError("event schema 1.0 does not carry latency_ms/request_sha256")
         _validate_canonical_uuid(self.event_id, "event_id")
-        for name in ("site_id", "station_id", "session_id", "inspection_id", "reason", "software_version", "inference_status"):
+        for name in ("site_id", "station_id", "session_id", "inspection_id", "reason", "software_version",
+                     "inference_status"):
             if not _is_str(getattr(self, name)):
                 raise ContractError(f"{name} must be a non-empty string")
         try:
@@ -103,7 +104,8 @@ class EventEnvelope:
         except ValueError as exc:
             raise ContractError(f"unknown inference_status {self.inference_status!r}") from exc
         validate_utc(self.captured_at_utc)
-        if not isinstance(self.capture_sequence, int) or isinstance(self.capture_sequence, bool) or self.capture_sequence < 0:
+        if (not isinstance(self.capture_sequence, int) or isinstance(self.capture_sequence, bool)
+                or self.capture_sequence < 0):
             raise ContractError("capture_sequence must be int >= 0")
         if not isinstance(self.result, InspectionResult):
             raise ContractError("result must be InspectionResult")
@@ -126,7 +128,8 @@ class EventEnvelope:
             if not {"id", "version", "sha256"} <= set(self.model):
                 raise ContractError("model must carry id, version, sha256")
             ModelRef.from_dict(self.model)  # validates sha256 format
-        if self.rule is not None and (not isinstance(self.rule, dict) or not (_is_str(self.rule.get("id")) and _is_str(self.rule.get("version")))):
+        if self.rule is not None and (not isinstance(self.rule, dict) or not (
+                _is_str(self.rule.get("id")) and _is_str(self.rule.get("version")))):
             raise ContractError("rule must carry non-empty id and version or be null")
         if self.result in (InspectionResult.PASS, InspectionResult.DEFECT):
             if self.model is None or self.rule is None or self.inference_status != InferenceStatus.OK.value:
@@ -183,7 +186,7 @@ class EventEnvelope:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EventEnvelope":
+    def from_dict(cls, data: dict[str, Any]) -> EventEnvelope:
         if not isinstance(data, dict):
             raise ContractError("event payload must be an object")
         if data.get("schema_version") == EVENT_SCHEMA_VERSION:

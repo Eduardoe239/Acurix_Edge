@@ -6,12 +6,14 @@ valid CapturedFrame 1.1 with increasing sequence, increasing monotonic time, UTC
 resolution; termination is explicit and never repeats a frame."""
 
 import unittest
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from acurix_edge.capture.frames import FrameStamper, InvalidImageError, check_image, quality_metrics
 from acurix_edge.capture.sources import (
     FrameSource,
+    Image,
     ImageFolderSource,
     SourceError,
     SourceLostError,
@@ -22,13 +24,20 @@ from acurix_edge.capture.sources import (
 from acurix_edge.contracts.capture import CapturedFrame, CaptureStatus
 from acurix_edge.contracts.common import validate_utc
 from acurix_edge.contracts.inference import ImageQuality
-from tests.capture_support import H, W, SyntheticCamera, synth_image, write_image_folder, write_video
+from tests.capture_support import H, SyntheticCamera, W, synth_image, write_image_folder, write_video
 from tests.support import TempDirTestCase
 
 N = 5
 
 
-class SourceContract:
+# The mixin is typed as a TestCase for mypy only; at runtime it is a plain object (not collected).
+if TYPE_CHECKING:
+    _ContractBase = unittest.TestCase
+else:
+    _ContractBase = object
+
+
+class SourceContract(_ContractBase):
     """Mixin: subclasses provide make_source(n) and make_missing()."""
 
     def make_source(self, n: int) -> FrameSource:
@@ -37,7 +46,7 @@ class SourceContract:
     def make_missing(self) -> FrameSource:
         raise NotImplementedError
 
-    def read_all(self, src: FrameSource, n: int) -> list[np.ndarray]:
+    def read_all(self, src: FrameSource, n: int) -> list[Image | None]:
         src.open()
         self.addCleanup(src.close)
         return [src.read() for _ in range(n)]
@@ -101,7 +110,7 @@ class ImageFolderContractTests(SourceContract, TempDirTestCase):
 
     def test_lossless_order_and_content(self):
         src = self.make_source(N)
-        for got, expected in zip(self.read_all(src, N), self.originals):
+        for got, expected in zip(self.read_all(src, N), self.originals, strict=False):
             np.testing.assert_array_equal(got, expected)
 
     def test_empty_folder_and_undecodable_file(self):
@@ -139,7 +148,7 @@ class WebcamContractTests(SourceContract, unittest.TestCase):
     def test_invalid_device_index(self):
         for bad in (-1, True, "0"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                WebcamSource(bad)  # type: ignore[arg-type]
+                WebcamSource(bad)
 
 
 class QualityMetricsTests(unittest.TestCase):

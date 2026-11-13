@@ -142,7 +142,8 @@ class EventService:
             confidence=decision.confidence,
             model=inference.model.to_dict() if inference.model else None,
             configuration=self._configuration,
-            review_status=ReviewStatus.PENDING if decision.result is InspectionResult.REVIEW else ReviewStatus.NOT_REQUIRED,
+            review_status=(ReviewStatus.PENDING if decision.result is InspectionResult.REVIEW
+                           else ReviewStatus.NOT_REQUIRED),
             software_version=self._software_version,
             extra={
                 "inference_error_code": inference.error_code,
@@ -184,4 +185,5 @@ class EventService:
             log.warning("event re-submitted with identical payload", extra={
                 "code": "EVENT_DUPLICATE", "ctx": {"event_id": envelope.event_id,
                                                     "inspection_id": envelope.inspection_id}})
-        return RecordResult(envelope.event_id, outcome is AppendOutcome.INSERTED or outcome is AppendOutcome.DUPLICATE, outcome)
+        persisted = outcome is AppendOutcome.INSERTED or outcome is AppendOutcome.DUPLICATE
+        return RecordResult(envelope.event_id, persisted, outcome)

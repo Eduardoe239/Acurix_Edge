@@ -21,15 +21,16 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 
 from acurix_edge.contracts.errors import ErrorCode
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
-Image = np.ndarray
+Image = npt.NDArray[np.uint8]  # 8-bit image as delivered by OpenCV (BGR, BGRA or gray)
 
 
 class SourceError(RuntimeError):
@@ -102,7 +103,7 @@ class ImageFolderSource:
         image = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
         if image is None:
             raise SourceLostError(f"{self.source_id}: {path.name} is not a decodable image")
-        return image
+        return cast(Image, image)
 
     def close(self) -> None:
         self._files = None
@@ -226,7 +227,7 @@ class VideoFileSource(_VideoCaptureSource):
         if not ok:
             self._ended = True
             return None
-        return image
+        return cast(Image, image)
 
 
 def _default_webcam_factory(index: int) -> Any:
@@ -261,4 +262,4 @@ class WebcamSource(_VideoCaptureSource):
         ok, image = self._grab()
         if not ok:
             raise SourceLostError(f"{self.source_id}: no frame from camera")
-        return image
+        return cast(Image, image)

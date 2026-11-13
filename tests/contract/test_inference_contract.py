@@ -1,6 +1,7 @@
 import json
 import math
 import unittest
+from typing import Any
 
 from acurix_edge.adapters.inference_noop import NoOpInferenceAdapter
 from acurix_edge.contracts.errors import ContractError
@@ -44,8 +45,9 @@ class InferenceContractTests(unittest.TestCase):
                 self.assertEqual(InferenceResult.from_dict(json.loads(json.dumps(r.to_dict()))), r)
 
     def test_invariants(self):
-        base = dict(inspection_id="i", runtime=FIXTURE_RUNTIME, input=InputDescriptor(1, 1, ImageQuality.VALID))
-        bad = [
+        base: dict[str, Any] = dict(inspection_id="i", runtime=FIXTURE_RUNTIME,
+                                    input=InputDescriptor(1, 1, ImageQuality.VALID))
+        bad: list[dict[str, Any]] = [
             dict(status=InferenceStatus.OK, model=None),
             dict(status=InferenceStatus.OK, model=FIXTURE_MODEL, error_code="E"),
             dict(status=InferenceStatus.NO_MODEL, error_code=None),
@@ -55,15 +57,13 @@ class InferenceContractTests(unittest.TestCase):
             dict(status=InferenceStatus.OK, model=FIXTURE_MODEL, schema_version="9.9"),
         ]
         for kw in bad:
-            with self.subTest(kw=kw):
-                with self.assertRaises(ContractError):
-                    InferenceResult(**{**base, **kw})
+            with self.subTest(kw=kw), self.assertRaises(ContractError):
+                InferenceResult(**{**base, **kw})
 
     def test_prediction_and_model_validation(self):
         for conf in (-0.01, 1.01, math.nan, True):
-            with self.subTest(conf=conf):
-                with self.assertRaises(ContractError):
-                    Prediction("c", conf)
+            with self.subTest(conf=conf), self.assertRaises(ContractError):
+                Prediction("c", conf)
         with self.assertRaises(ContractError):
             Prediction("", 0.5)
         with self.assertRaises(ContractError):
@@ -77,9 +77,8 @@ class InferenceContractTests(unittest.TestCase):
         for bad in ({"id": None, "version": "1", "sha256": "0" * 64},
                     {"id": "m", "version": None, "sha256": "0" * 64},
                     {"id": "m", "version": "1", "sha256": "0" * 64 + "\n"}):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ContractError):
-                    ModelRef.from_dict(bad)
+            with self.subTest(bad=bad), self.assertRaises(ContractError):
+                ModelRef.from_dict(bad)
 
     def test_from_dict_rejects_malformed(self):
         good = ok_result().to_dict()
@@ -91,9 +90,8 @@ class InferenceContractTests(unittest.TestCase):
         ):
             d = json.loads(json.dumps(good))
             mutate(d)
-            with self.subTest(d=d):
-                with self.assertRaises(ContractError):
-                    InferenceResult.from_dict(d)
+            with self.subTest(d=d), self.assertRaises(ContractError):
+                InferenceResult.from_dict(d)
 
     def test_usable_requires_ok_model_and_valid_input(self):
         self.assertTrue(ok_result().is_usable)

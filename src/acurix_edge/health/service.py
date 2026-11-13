@@ -110,7 +110,8 @@ class HealthService:
         for name, (check, critical, group) in self._checks.items():
             code: ErrorCode | None = None
             try:
-                result = check()
+                # typed as object: a check may violate its signature; validated below at runtime
+                result: object = check()
                 if not isinstance(result, tuple) or len(result) not in (2, 3):
                     raise TypeError("check must return (status, detail[, code])")
                 status, detail = result[0], result[1]
@@ -156,7 +157,7 @@ def host_memory() -> dict[str, float] | None:
 
     stat = _MemStatus()
     stat.dwLength = ctypes.sizeof(_MemStatus)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):  # type: ignore[attr-defined]
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):  # type: ignore[attr-defined,unused-ignore]  # windll: Windows only
         return None
     gb = 1024 ** 3
     return {"total_gb": round(stat.ullTotalPhys / gb, 2), "available_gb": round(stat.ullAvailPhys / gb, 2)}

@@ -117,7 +117,8 @@ class FrameBuffer:
         alarm = None
         with self._cond:
             if not self.drop_oldest:  # back-pressure: wait for space, a close or a stop request
-                while self._closed is None and len(self._q) >= self.capacity and not (stop is not None and stop.is_set()):
+                while (self._closed is None and len(self._q) >= self.capacity
+                       and not (stop is not None and stop.is_set())):
                     self._cond.wait(0.05)
             self._captured += 1  # counted after the wait: the invariant holds at every snapshot
             cause: str | None = None

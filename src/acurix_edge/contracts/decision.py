@@ -97,7 +97,7 @@ class Decision:
              "decided_at_utc", "latency_ms", "software_version")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Decision":
+    def from_dict(cls, data: dict[str, Any]) -> Decision:
         require_keys(data, cls._KEYS, "decision")
         try:
             return cls(

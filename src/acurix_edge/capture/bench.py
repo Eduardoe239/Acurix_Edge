@@ -27,7 +27,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -158,14 +158,14 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 def capture_session(source: FrameSource, output_root: Path, params: BenchParams, *, frames: int,
                     interval_s: float = 0.0, session_id: str | None = None,
-                    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                    now: Callable[[], datetime] = lambda: datetime.now(UTC),
                     device_label: str | None = None) -> BenchResult:
     problems = params.problems()
     if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= MAX_FRAMES:
         problems.append(f"frames must be int in 1..{MAX_FRAMES}")
     if isinstance(interval_s, bool) or not isinstance(interval_s, (int, float)) or not 0 <= interval_s <= 3600:
         problems.append("interval_s must be a number in 0..3600")
-    device = device_label or source.source_id
+    device = source.source_id if device_label is None else device_label  # an explicit "" is refused below
     if not _required_text(device):
         problems.append("camera device label must be non-empty printable text, at most 200 chars")
     if problems:
@@ -245,7 +245,7 @@ def capture_session(source: FrameSource, output_root: Path, params: BenchParams,
         "manifest_schema": MANIFEST_SCHEMA,
         "session_id": session_dir.name,
         "captured_by": params.captured_by,
-        "captured_at_utc": started.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "captured_at_utc": started.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "optics_version": params.optics_version,
         "camera": {"device": device, "resolution": resolution,
                    "exposure": params.exposure, "focus": params.focus},

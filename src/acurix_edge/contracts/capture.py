@@ -67,7 +67,7 @@ class FrameQualityMetrics:
         return {"mean_brightness": self.mean_brightness, "sharpness": self.sharpness}
 
     @classmethod
-    def from_dict(cls, data: Any) -> "FrameQualityMetrics":
+    def from_dict(cls, data: Any) -> FrameQualityMetrics:
         require_keys(data, ("mean_brightness", "sharpness"), "quality_metrics")
         if set(data) != {"mean_brightness", "sharpness"}:
             raise ContractError("quality_metrics has unknown fields")
@@ -141,7 +141,7 @@ class CapturedFrame:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CapturedFrame":
+    def from_dict(cls, data: dict[str, Any]) -> CapturedFrame:
         require_keys(data, _KEYS, "capture")
         try:
             return cls(

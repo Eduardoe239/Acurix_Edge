@@ -15,7 +15,7 @@ import re
 import sys
 import traceback
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, TextIO
 
 REDACTED = "***REDACTED***"
@@ -137,7 +137,7 @@ class JsonFormatter(logging.Formatter):
         except Exception as exc:  # malformed %-args must not drop the log line
             message = f"<unformattable log message: {type(exc).__name__}>"
         entry: dict[str, Any] = {
-            "ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "component": record.name,
             "msg": redact(message, stats=stats),
@@ -149,10 +149,10 @@ class JsonFormatter(logging.Formatter):
         if ctx is not None:
             entry["ctx"] = redact(ctx, stats=stats)
         if record.exc_info:
-            exc_type, exc, _tb = record.exc_info
+            exc_type, exc_value, _tb = record.exc_info
             entry["exc"] = {
                 "type": exc_type.__name__ if exc_type else None,
-                "message": redact(str(exc), stats=stats),
+                "message": redact(str(exc_value), stats=stats),
                 "trace": redact("".join(traceback.format_exception(*record.exc_info)), stats=stats),
             }
         omitted = stats.to_dict()

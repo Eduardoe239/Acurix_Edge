@@ -193,7 +193,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         """CREATE TRIGGER trg_inspection_event_no_update BEFORE UPDATE ON inspection_event
 BEGIN
   SELECT RAISE(ABORT, 'AEX-DB: inspection_event is immutable; UPDATE forbidden (migration 3). Record reviews in table review.');
-END""",
+END""",  # noqa: E501 (trigger DDL text must stay byte-identical)
     ),
 }
 IMMUTABILITY_TRIGGER = "trg_inspection_event_no_update"
@@ -321,7 +321,8 @@ class SqliteEventStore:
                     self._load_last_event_time()
                     return
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(self._path, timeout=self._timeout_s, isolation_level=None, check_same_thread=False)
+                conn = sqlite3.connect(self._path, timeout=self._timeout_s, isolation_level=None,
+                                       check_same_thread=False)
                 self._conn = conn
                 conn.execute("PRAGMA foreign_keys = ON")
                 conn.execute("PRAGMA journal_mode = WAL")
@@ -473,7 +474,8 @@ class SqliteEventStore:
                                          " AND name='inspection_event'").fetchone()[0]
                 if version < 1 or not has_events:
                     raise PersistenceError(f"backup {backup.name} is not an Acurix database "
-                                           f"(user_version {version}, inspection_event {'present' if has_events else 'absent'})")
+                                           f"(user_version {version}, "
+                                           f"inspection_event {'present' if has_events else 'absent'})")
                 identity = cls._create_exclusive(dest, "restore")
                 cls._refuse_side_files(dest)  # review R3 B-f: re-checked after creation
                 target = sqlite3.connect(dest)
@@ -583,7 +585,8 @@ class SqliteEventStore:
             missing = EXPECTED_TABLES - tables
             if missing:
                 return False, f"missing tables {sorted(missing)}"
-            for table, expected in (("inspection_event", EXPECTED_EVENT_COLUMNS), ("audit_entry", EXPECTED_AUDIT_COLUMNS)):
+            for table, expected in (("inspection_event", EXPECTED_EVENT_COLUMNS),
+                                    ("audit_entry", EXPECTED_AUDIT_COLUMNS)):
                 with self._lock:
                     cols = {r[1] for r in self._c().execute(f"PRAGMA table_info({table})")}
                 missing_cols = expected - cols
@@ -607,7 +610,7 @@ class SqliteEventStore:
     def integrity_check(self) -> bool:
         with self._lock:
             try:
-                return self._c().execute("PRAGMA quick_check").fetchone()[0] == "ok"
+                return bool(self._c().execute("PRAGMA quick_check").fetchone()[0] == "ok")
             except sqlite3.Error as exc:
                 raise self._err("integrity check failed", exc) from exc
 
@@ -622,7 +625,8 @@ class SqliteEventStore:
             persisted_at = utc_now_iso()
             params = (
                 env.event_id, env.schema_version, env.site_id, env.station_id, env.session_id,
-                env.inspection_id, env.captured_at_utc, env.capture_sequence, env.result.value, env.reason, env.inference_status,
+                env.inspection_id, env.captured_at_utc, env.capture_sequence, env.result.value, env.reason,
+                env.inference_status,
                 rule.get("id"), rule.get("version"), env.class_id, env.confidence, model.get("id"),
                 model.get("version"), model.get("sha256"), env.configuration["version"],
                 env.configuration["sha256"], env.review_status.value, env.software_version, payload, digest,
