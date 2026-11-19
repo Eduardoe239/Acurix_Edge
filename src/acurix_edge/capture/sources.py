@@ -144,10 +144,22 @@ class _VideoCaptureSource:
         self._close_gen = 0                 # bumped by close(): an open that raced a close is discarded
         self._reading: dict[int, int] = {}   # id(cap) -> reads in flight
         self._deferred: dict[int, Any] = {}  # id(cap) -> cap to release after its read returns
+        # id(cap) -> event that lets the thread which CREATED the capture object finish. On Windows,
+        # DirectShow objects die with the thread that created them (measured 20/11/2026: get -> 0x0
+        # and read fails once that thread ends), so an opener thread lives until its object is released.
+        self._keepers: dict[int, threading.Event] = {}
 
     @property
     def is_open(self) -> bool:
         return self._cap is not None
+
+    def _release_owned(self, cap: Any) -> None:
+        """Release a capture object of this source, THEN let its creating thread end."""
+        _release(cap)
+        with self._io_lock:
+            keeper = self._keepers.pop(id(cap), None)
+        if keeper is not None:
+            keeper.set()
 
     def _configure(self, cap: Any) -> dict[str, Any]:
         """Hook for source-specific settings after a successful open. Returns facts measured on
@@ -183,10 +195,13 @@ class _VideoCaptureSource:
                 discard = None
                 self._install(*created)
         if discard is not None:
-            _release(discard)
+            self._release_owned(discard)
             raise SourceOpenError(f"{self.source_id}: source closed while opening")
 
     def open(self) -> None:
+        """Unbounded open ON THE CALLING THREAD. On Windows (DirectShow) that thread must outlive
+        the capture object (review CAPTURE-008, B1): never call it from a short-lived thread. Product
+        code uses `open_with_timeout`, whose opener thread is kept alive until the release."""
         with self._open_lock:
             if self._cap is not None:
                 return
@@ -206,6 +221,7 @@ class _VideoCaptureSource:
     def _open_bounded(self, timeout_s: float, close_gen: int) -> None:
         box: dict[str, Any] = {}
         guard = threading.Lock()
+        done = threading.Event()  # set when the open finished (the thread itself stays alive)
 
         def run() -> None:
             try:
@@ -213,28 +229,46 @@ class _VideoCaptureSource:
             except BaseException as exc:  # re-raised in the caller thread (if it still waits)
                 with guard:
                     box["error"] = exc
+                done.set()
                 return
+            keeper = threading.Event()
             with guard:
                 late = box.get("abandoned", False)
                 if not late:
+                    with self._io_lock:  # registered BEFORE the caller can install or discard it
+                        self._keepers[id(created[0])] = keeper
                     box["created"] = created
+            done.set()
             if late:
-                _release(created[0])
+                _release(created[0])  # never installed: released here, by its own thread
+                return
+            keeper.wait()  # stay alive while the capture object exists (DirectShow thread affinity)
 
         t = threading.Thread(target=run, name="acurix-capture-open", daemon=True)
         t.start()
         try:
-            t.join(timeout_s)
-        finally:  # also on KeyboardInterrupt: a late open must release itself (review BENCH-VIEW B1)
-            with guard:
-                pending = "created" not in box and "error" not in box
-                if pending:
-                    box["abandoned"] = True
-        if pending:
-            raise SourceOpenError(f"{self.source_id}: camera did not open within {timeout_s:g} s")
-        if "error" in box:
-            raise box["error"]
-        self._install_unless_closed(box["created"], close_gen)
+            try:
+                done.wait(timeout_s)  # NOT t.join(): the thread outlives the open on purpose
+            finally:  # also on KeyboardInterrupt: a late open must release itself (review BENCH-VIEW B1)
+                with guard:
+                    pending = "created" not in box and "error" not in box
+                    if pending:
+                        box["abandoned"] = True
+            if pending:
+                raise SourceOpenError(f"{self.source_id}: camera did not open within {timeout_s:g} s")
+            if "error" in box:
+                raise box["error"]
+            self._install_unless_closed(box["created"], close_gen)
+        except BaseException:
+            # Opened but NOT installed (e.g. Ctrl+C between the open and the install): release it and
+            # let its thread end, unless that already happened (review CAPTURE-008, M1).
+            created = box.get("created")
+            if created is not None:
+                with self._io_lock:
+                    owned = id(created[0]) in self._keepers and self._cap is not created[0]
+                if owned:
+                    self._release_owned(created[0])
+            raise
 
     def _pin(self, what: str) -> Any:
         """Mark a native operation in flight on the CURRENT capture object and return it. Until
@@ -257,7 +291,7 @@ class _VideoCaptureSource:
                 del self._reading[id(cap)]
                 release_now = self._deferred.pop(id(cap), None)
         if release_now is not None:
-            _release(release_now)
+            self._release_owned(release_now)
 
     def _grab(self) -> tuple[bool, Any]:
         cap = self._pin("read")
@@ -282,7 +316,7 @@ class _VideoCaptureSource:
                 self._deferred[id(cap)] = cap  # released by the reader when its read returns
                 cap = None
         if cap is not None:
-            _release(cap)
+            self._release_owned(cap)
 
 
 class VideoFileSource(_VideoCaptureSource):
@@ -401,6 +435,9 @@ class WebcamSource(_VideoCaptureSource):
                     delivered.add(resolution(got_w, got_h))
             if self._cap is not cap:
                 raise SourceError(f"{self.source_id}: source closed during profile measurement")
+            if not delivered:  # an empty profile matches nothing and is not a valid configuration
+                raise SourceOpenError(f"{self.source_id}: driver reported no resolution; camera cannot be "
+                                      "profiled (is it answering?)")
         finally:
             try:
                 if self._cap is cap:
