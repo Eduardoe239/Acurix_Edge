@@ -47,6 +47,7 @@ from acurix_edge.capture.manifest import (
     is_valid_session_id,
     validate_manifest,
 )
+from acurix_edge.capture.profile import CameraProfile, check_camera
 from acurix_edge.capture.sources import FrameSource, SourceError
 
 log = logging.getLogger("acurix_edge.capture.bench")
@@ -159,7 +160,10 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 def capture_session(source: FrameSource, output_root: Path, params: BenchParams, *, frames: int,
                     interval_s: float = 0.0, session_id: str | None = None,
                     now: Callable[[], datetime] = lambda: datetime.now(UTC),
-                    device_label: str | None = None) -> BenchResult:
+                    device_label: str | None = None,
+                    expected_profile: CameraProfile | None = None) -> BenchResult:
+    """A camera source (webcam) must match `expected_profile` (fail-closed when None) BEFORE the
+    session folder is created; folder/video sources are not profiled."""
     problems = params.problems()
     if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= MAX_FRAMES:
         problems.append(f"frames must be int in 1..{MAX_FRAMES}")
@@ -176,6 +180,17 @@ def capture_session(source: FrameSource, output_root: Path, params: BenchParams,
         source.open()
     except SourceError as exc:
         raise BenchError([f"source unavailable (AEX-CAP-001): {exc}"]) from exc
+    try:
+        check_camera(source, expected_profile)
+    except SourceError as exc:
+        source.close()
+        raise BenchError([f"source refused (AEX-CAP-001): {exc}"]) from exc
+    except Exception as exc:  # backend error while profiling: still a refusal, never a traceback (B4)
+        source.close()
+        raise BenchError([f"source refused (AEX-CAP-001): camera profile failed ({type(exc).__name__})"]) from exc
+    except BaseException:
+        source.close()
+        raise
     session_dir: Path | None = None
     entries: list[dict[str, str]] = []
     resolution: str | None = None

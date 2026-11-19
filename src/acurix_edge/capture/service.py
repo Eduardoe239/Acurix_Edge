@@ -1,18 +1,19 @@
-"""Capture service: verification, producer thread, loss watchdog and reconnection
+"""Capture service: verification, producer thread and loss watchdog
 (CAP-003, CAP-004, HLT-002, HLT-004).
 
 Lifecycle (`CaptureState`):
     UNVERIFIED --verify()--> VERIFIED --begin(session)--> RUNNING --end()--> STOPPED
     RUNNING --end of finite source--> ENDED (explicit, not an error)
     RUNNING --read error / invalid frame / read blocked > frame_timeout_s--> LOST
-    LOST --reconnect attempt ok--> RECONNECTED   (never re-bound to the lost session)
-    LOST --all attempts failed--> LOST (final until a new verify())
+    LOST: final. The source is closed and NEVER reopened by itself (owner decision 19/11/2026:
+          a reopen by device index may silently pick another physical camera). Only a new
+          verify() — reached through reset-fault + a new session — opens it again.
 
 Guarantees:
-- the camera is UNKNOWN for health until verify() opened it AND received a valid frame;
+- the camera is UNKNOWN for health until verify() opened it, matched the expected camera
+  profile (capture/profile.py) AND received a valid frame;
 - on loss, `on_lost(detail, session_id)` is called once per session; the session binding is
-  dropped at that instant, so frames are never delivered to the old session again — a
-  reconnection only makes the source usable for a NEW session (begin() with a new id);
+  dropped at that instant, so frames are never delivered to the old session again;
 - every frame that entered the buffer is either delivered or counted as dropped with a cause.
 """
 
@@ -29,6 +30,7 @@ from typing import Any
 from acurix_edge.capture.buffer import SESSION_ENDED, BufferClosed, BufferCounters, FrameBuffer
 from acurix_edge.capture.errors import CaptureError, CaptureLost, CaptureUnavailable, EndOfStream, StaleSession
 from acurix_edge.capture.frames import FrameStamper, InvalidImageError, check_image
+from acurix_edge.capture.profile import CameraProfile, check_camera, expected_profile
 from acurix_edge.capture.sources import FrameSource, Image, SourceError, SourceLostError, SourceOpenError
 from acurix_edge.config.settings import CaptureConfig
 from acurix_edge.contracts.capture import CapturedFrame
@@ -47,8 +49,6 @@ class CaptureState(StrEnum):
     RUNNING = "RUNNING"
     ENDED = "ENDED"
     LOST = "LOST"
-    RECONNECTING = "RECONNECTING"
-    RECONNECTED = "RECONNECTED"
     STOPPED = "STOPPED"
 
 
@@ -78,6 +78,8 @@ class CaptureService:
         self._pending: Image | None = None
         self._threads: list[threading.Thread] = []
         self.lost_at: float | None = None  # clock() when the loss was declared (HLT-004 measurement)
+        self.expected_profile: CameraProfile | None = expected_profile(config)
+        self.profile: CameraProfile | None = None  # profile measured at the last successful verify()
 
     # -- introspection ------------------------------------------------------------
     @property
@@ -112,7 +114,7 @@ class CaptureService:
         sid = f"{self.source.source_id}: "
         if state in (CaptureState.UNVERIFIED, CaptureState.STOPPED):
             return ComponentStatus.UNKNOWN, sid + detail, ErrorCode.CAP_001
-        if state in (CaptureState.LOST, CaptureState.RECONNECTING):
+        if state is CaptureState.LOST:
             return ComponentStatus.FAULT, sid + detail, ErrorCode.CAP_001
         return ComponentStatus.OK, sid + detail
 
@@ -123,13 +125,13 @@ class CaptureService:
         except Exception:
             log.exception("capture source close failed", extra={"code": "CAPTURE_CLOSE_ERROR"})
 
-    def _read_with_timeout(self, timeout: float) -> Image | None:
-        """source.read() bounded in time (a webcam read can block indefinitely)."""
+    def _call_with_timeout(self, fn: Callable[[], Any], timeout: float, what: str) -> Any:
+        """fn() bounded in time (a webcam read can block indefinitely)."""
         box: dict[str, Any] = {}
 
         def run() -> None:
             try:
-                box["image"] = self.source.read()
+                box["value"] = fn()
             except BaseException as exc:  # re-raised in the caller thread
                 box["error"] = exc
 
@@ -137,21 +139,25 @@ class CaptureService:
         t.start()
         t.join(timeout)
         if t.is_alive():
-            raise SourceLostError(f"{self.source.source_id}: no frame within {timeout:g} s")
+            raise SourceLostError(f"{self.source.source_id}: no {what} within {timeout:g} s")
         if "error" in box:
             raise box["error"]
-        return box.get("image")
+        return box.get("value")
 
-    def _probe_source(self) -> Image:
-        """Open the source and get one valid frame, or raise SourceError/InvalidImageError."""
-        if not self.source.live:
-            self._close_source()  # finite sources are rewound: verification never consumes a frame
-        if not self.source.is_open:
-            self.source.open()
-        image = self._read_with_timeout(self.config.verify_timeout_s)
+    def _probe_source(self) -> tuple[Image, CameraProfile | None]:
+        """Open the source, check the camera profile, get one valid frame.
+        Raises SourceError (incl. CameraMismatch) or InvalidImageError."""
+        # Always a FRESH open: finite sources are rewound (verification never consumes a frame) and a
+        # live camera never reuses a handle left over from a previous session (review 2, B-1).
+        self._close_source()
+        self.source.open()
+        profile: CameraProfile | None = self._call_with_timeout(
+            lambda: check_camera(self.source, self.expected_profile), self.config.profile_timeout_s,
+            "camera profile")
+        image = self._call_with_timeout(self.source.read, self.config.verify_timeout_s, "frame")
         if image is None:
             raise SourceOpenError(f"{self.source.source_id}: source has no frames")
-        return check_image(image)
+        return check_image(image), profile
 
     # -- verification (HLT-002) ------------------------------------------------------
     def verify(self) -> None:
@@ -159,11 +165,10 @@ class CaptureService:
         with self._lock:
             if self._state in (CaptureState.RUNNING, CaptureState.ENDED):
                 raise CaptureError(f"capture already bound to session {self._session_id}")
-            if self._state is CaptureState.RECONNECTING:
-                raise CaptureUnavailable(f"{self.source.source_id}: reconnection in progress ({self._detail})")
             self._state, self._detail = CaptureState.UNVERIFIED, "verification in progress"
+            self.profile = None
         try:
-            image = self._probe_source()
+            image, profile = self._probe_source()
         except Exception as exc:  # any failure (incl. OSError, cv2.error, MemoryError) = unavailable
             if not isinstance(exc, (SourceError, InvalidImageError)):  # unexpected: keep the traceback (L2)
                 log.exception("camera verification raised", extra={"code": ErrorCode.CAP_001.value})
@@ -177,8 +182,10 @@ class CaptureService:
         with self._lock:
             # A finite source keeps the probe frame as the first session frame (nothing skipped).
             self._pending = None if self.source.live else image
+            self.profile = profile
             h, w = image.shape[:2]
-            self._state, self._detail = CaptureState.VERIFIED, f"verified ({w}x{h})"
+            matched = f"; camera profile matched ('{profile.device_label}')" if profile else ""
+            self._state, self._detail = CaptureState.VERIFIED, f"verified ({w}x{h}){matched}"
 
     # -- session binding -------------------------------------------------------------
     def begin(self, session_id: str) -> None:
@@ -234,7 +241,7 @@ class CaptureService:
             raise CaptureLost(f"session {session_id}: {closed.reason}") from None
 
     def end(self, session_id: str | None = None) -> None:
-        """Unbind the session and release the source. Never cancels an ongoing reconnection."""
+        """Unbind the session and release the source."""
         with self._lock:
             if session_id is not None and session_id != self._session_id:
                 return
@@ -356,17 +363,15 @@ class CaptureService:
             if self._gen != gen or self._state is not CaptureState.RUNNING:
                 return  # already ended/lost/stopped: the first cause wins
             self._gen += 1
-            new_gen = self._gen
             self._stop.set()
             self.lost_at = self._clock()
             lost_session, self._session_id = self._session_id, None
             if lost_session is not None:
                 self._retired[lost_session] = SOURCE_LOST
             buffer = self._buffer
-            reconnect = self.config.reconnect_max_attempts > 0 and not self._shutdown.is_set()
-            # RECONNECTING is set here, under the lock, so verify() can never slip in between (review B1).
-            self._state = CaptureState.RECONNECTING if reconnect else CaptureState.LOST
-            self._detail = f"camera lost: {detail}"
+            self._state = CaptureState.LOST
+            self._detail = (f"camera lost: {detail}; not reopened automatically — reset-fault and a new "
+                            "session are required")
             self._reading_since = None
         if buffer is not None:
             buffer.close(SOURCE_LOST, discard_pending=True)
@@ -378,63 +383,5 @@ class CaptureService:
                 self.on_lost(detail, lost_session)
             except Exception:
                 log.exception("camera loss handler failed", extra={"code": "CAPTURE_LOST_HANDLER_ERROR"})
-        if reconnect:
-            t = threading.Thread(target=self._reconnect, args=(new_gen,), name="acurix-capture-reconnect",
-                                 daemon=True)
-            with self._lock:
-                self._threads.append(t)
-            t.start()
-        else:
-            self._close_source()
-
-    # -- reconnection (CAP-004) ------------------------------------------------------
-    def _reconnect(self, gen: int) -> None:
-        """A reconnection thread that fails unexpectedly ends in a final LOST, never stuck in
-        RECONNECTING (review M2)."""
-        try:
-            self._try_reconnect(gen)
-        except BaseException as exc:
-            log.exception("camera reconnection crashed", extra={"code": ErrorCode.CAP_001.value})
-            self._close_source()
-            with self._lock:
-                if self._gen == gen:
-                    self._state = CaptureState.LOST
-                    self._detail = f"camera lost; reconnection aborted ({type(exc).__name__})"
-
-    def _try_reconnect(self, gen: int) -> None:
+        # No automatic reconnection (owner decision 19/11/2026): the source is closed and stays closed.
         self._close_source()
-        attempts = self.config.reconnect_max_attempts
-        last_error = ""
-        for attempt in range(1, attempts + 1):
-            if self._shutdown.wait(self.config.reconnect_interval_s):
-                return
-            with self._lock:
-                if self._gen != gen:
-                    return
-                self._detail = f"reconnecting (attempt {attempt}/{attempts})"
-            try:
-                self._probe_source()
-            except Exception as exc:  # an unexpected error is one more failed attempt
-                last_error = f"{type(exc).__name__}: {exc}"
-                self._close_source()
-                continue
-            with self._lock:
-                superseded = self._gen != gen
-                if not superseded:
-                    self._state = CaptureState.RECONNECTED
-                    self._detail = (f"reconnected after {attempt} attempt(s); previous session discarded, "
-                                    "a new session is required")
-            if superseded:
-                self._close_source()  # outside the lock: a driver stuck in release never blocks health (L4)
-                return
-            log.warning("camera reconnected; previous session is NOT resumed",
-                        extra={"code": "CAPTURE_RECONNECTED", "ctx": {"source": self.source.source_id,
-                                                                      "attempts": attempt}})
-            return
-        with self._lock:
-            if self._gen == gen:
-                self._state = CaptureState.LOST
-                self._detail = f"camera lost; reconnection failed after {attempts} attempt(s): {last_error}"
-        log.error("camera reconnection failed", extra={"code": ErrorCode.CAP_001.value,
-                                                       "ctx": {"source": self.source.source_id,
-                                                               "attempts": attempts}})

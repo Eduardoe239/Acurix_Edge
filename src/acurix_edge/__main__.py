@@ -15,11 +15,15 @@ Bench capture (CAP-005; writes only under <base-dir>/datasets/local/<session_id>
   python -m acurix_edge capture --source folder|video|webcam (--path P | --device N)
          --sku S --unit-id U --label L --lighting TEXT [--frames N] [...]
   python -m acurix_edge capture-verify --session-dir DIR
-`--source webcam` turns the real camera on: only with the owner's authorization.
+  python -m acurix_edge camera-profile --device N --device-label L
+`--source webcam` and `camera-profile` turn the real camera on: only with the owner's authorization.
+`--source webcam` requires `--config FILE` holding the expected camera profile ([capture] camera_*,
+printed by `camera-profile`); a different camera is refused (AEX-CAP-001) before anything is written.
 Exit codes (capture): 0 requested frames written (or finite source ended), 1 stopped early
 (source lost / resolution changed; manifest still written), 2 refused (missing/invalid
-parameters, existing session, source unavailable).
+parameters, existing session, source unavailable, camera profile mismatch).
 Exit codes (capture-verify): 0 manifest valid and every sha256 matches, 2 otherwise.
+Exit codes (camera-profile): 0 profile measured, 2 camera unavailable or invalid parameters.
 """
 
 from __future__ import annotations
@@ -53,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         return _capture(args)
     if args.command == "capture-verify":
         return _capture_verify(args)
+    if args.command == "camera-profile":
+        return _camera_profile(args)
 
     try:
         cfg = load_config(args.config)
@@ -111,23 +117,45 @@ def _add_capture_parsers(sub: Any) -> None:
     c.add_argument("--pose", default="")
     c.add_argument("--notes", default="")
     c.add_argument("--device-label", default=None,
-                   help="camera.device in the manifest (default: source id, e.g. webcam-usb-0)")
+                   help="camera.device in the manifest. Webcam: also part of the camera profile, so it must "
+                        "equal camera_device_label in --config (default: that configured label)")
     c.add_argument("--base-dir", type=Path, default=Path.cwd())
+    c.add_argument("--config", type=Path, default=None,
+                   help="configuration with the expected camera profile (required for --source webcam)")
     v = sub.add_parser("capture-verify", help="validate a session manifest and re-hash its files")
     v.add_argument("--session-dir", type=Path, required=True)
+    p = sub.add_parser("camera-profile", help="measure the camera profile to store as the expected one")
+    p.add_argument("--device", type=int, required=True, help="webcam index")
+    p.add_argument("--device-label", required=True, help="real camera name, stored in the profile")
 
 
 def _capture(args: argparse.Namespace) -> int:
     from acurix_edge.capture.bench import BenchError, BenchParams, capture_session
+    from acurix_edge.capture.profile import CameraProfile, expected_profile
     from acurix_edge.capture.sources import FrameSource, ImageFolderSource, VideoFileSource, WebcamSource
 
     source: FrameSource
+    expected: CameraProfile | None = None
+    device_label: str | None = args.device_label
     if args.source == "webcam":
         if args.device is None or args.path is not None:
             print(json.dumps({"error": "CAPTURE_REFUSED", "problems": ["webcam requires --device and no --path"]}),
                   file=sys.stderr)
             return 2
-        source = WebcamSource(args.device, width=args.width, height=args.height)
+        if args.config is None:
+            print(json.dumps({"error": "CAPTURE_REFUSED", "problems": [
+                "webcam requires --config with the expected camera profile ([capture] camera_*); "
+                "measure it with `python -m acurix_edge camera-profile`"]}, ensure_ascii=False), file=sys.stderr)
+            return 2
+        try:
+            expected = expected_profile(load_config(args.config).capture)
+        except ConfigError as exc:
+            print(json.dumps({"error": "CONFIG_INVALID", "problems": exc.problems}, ensure_ascii=False),
+                  file=sys.stderr)
+            return 2
+        if device_label is None and expected is not None:
+            device_label = expected.device_label  # the manifest names the configured camera
+        source = WebcamSource(args.device, width=args.width, height=args.height, device_label=device_label)
     else:
         if args.path is None or args.device is not None:
             print(json.dumps({"error": "CAPTURE_REFUSED",
@@ -142,7 +170,7 @@ def _capture(args: argparse.Namespace) -> int:
     try:
         result = capture_session(source, args.base_dir.resolve() / "datasets" / "local", params,
                                  frames=args.frames, interval_s=args.interval_s, session_id=args.session_id,
-                                 device_label=args.device_label)
+                                 device_label=device_label, expected_profile=expected)
     except BenchError as exc:
         print(json.dumps({"error": "CAPTURE_REFUSED", "problems": exc.problems}, ensure_ascii=False),
               file=sys.stderr)
@@ -163,6 +191,35 @@ def _capture_verify(args: argparse.Namespace) -> int:
         print(json.dumps({"valid": False, "problems": exc.problems}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps({"valid": True, "session_id": data["session_id"], "frames": len(data["frames"])}))
+    return 0
+
+
+def _camera_profile(args: argparse.Namespace) -> int:
+    """Open the camera, measure its profile, close it. Frames are only measured (never written)."""
+    from acurix_edge.capture.profile import label_ok
+    from acurix_edge.capture.sources import SourceError, WebcamSource
+
+    problems = []
+    if args.device < 0:
+        problems.append("--device must be >= 0")
+    if not label_ok(args.device_label):
+        problems.append("--device-label must be printable text, 1..200 chars, no outer spaces")
+    if problems:
+        print(json.dumps({"error": "PROFILE_REFUSED", "problems": problems}, ensure_ascii=False), file=sys.stderr)
+        return 2
+    source = WebcamSource(args.device, device_label=args.device_label)
+    try:
+        source.open()
+        profile = source.measure_profile()
+    except Exception as exc:  # SourceError or a backend error: always a structured AEX-CAP-001 (B4)
+        detail = str(exc) if isinstance(exc, SourceError) else f"profile failed ({type(exc).__name__})"
+        print(json.dumps({"error": "CAMERA_UNAVAILABLE", "code": "AEX-CAP-001", "detail": detail},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    finally:
+        source.close()
+    print(json.dumps({"profile": profile.to_dict(), "config_toml": profile.to_toml()}, indent=2,
+                     ensure_ascii=False))
     return 0
 
 

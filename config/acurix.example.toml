@@ -26,9 +26,16 @@ backward_tolerance_s = 2.0    # 0..10 s; clock behind last event within this = l
 queue_max_frames = 4          # 1..64; when full the OLDEST frame is dropped and counted
 drop_alarm_threshold = 0      # drops per session above this -> AEX-CAP-002 (0 = any drop)
 frame_timeout_s = 1.0         # 0.05..1.9; a read blocked longer than this = camera lost -> FAULT
-verify_timeout_s = 5.0        # 0.1..30; open + first valid frame before OBSERVING
-reconnect_interval_s = 1.0    # 0.01..60; reopening never resumes the previous session
-reconnect_max_attempts = 10   # 0..1000 (0 = no reconnection)
+verify_timeout_s = 5.0        # 0.1..30; first valid frame after opening, before OBSERVING
+profile_timeout_s = 10.0      # 0.1..60; camera profile measurement (~0.65 s per size on DirectShow)
+# No automatic reconnection (owner decision 19/11/2026): a lost camera stays FAULT; recovery =
+# reset-fault (actor + reason) + a new session. reconnect_* keys are refused.
+# Expected camera profile (HEURISTIC identity check, AEX-CAP-001 on mismatch). All four or none;
+# with none, a webcam is refused. Measure with: python -m acurix_edge camera-profile --device N --device-label L
+# camera_backend = "DSHOW"
+# camera_default_resolution = "640x480"
+# camera_resolutions = ["320x240", "640x480"]
+# camera_device_label = "real camera name"
 
 [quality]                     # QG-001..003 image quality envelope (release 0.3.0)
 # ALL VALUES PROVISIONAL: calibrate in the optical test (Anexo 04A 3.2) with the USB webcam.

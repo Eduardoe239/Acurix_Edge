@@ -78,17 +78,30 @@ class CaptureConfig:
     - drop_alarm_threshold: frames dropped in one session above this -> AEX-CAP-002 (log, audit,
       health `queue` DEGRADED). 0 means any drop raises the alarm.
     - frame_timeout_s: a read blocked longer than this is a camera loss (FAULT).
-    - verify_timeout_s: time allowed to open the source and get the first valid frame.
-    - reconnect_interval_s / reconnect_max_attempts: reopening after a loss (0 attempts = never).
-      A reconnection never resumes the previous session.
+    - verify_timeout_s: time allowed to get the first valid frame after opening the source.
+    - profile_timeout_s: time allowed to measure the camera profile (~0.65 s per requested size
+      on DirectShow, 5 sizes).
+    - NO automatic reconnection (owner decision 19/11/2026): a lost camera is never reopened by
+      itself; recovery = reset-fault (actor + reason) and a new session.
+    - camera_*: EXPECTED camera profile (capture/profile.py, heuristic). All four set, or none;
+      with none, a camera source is refused (fail-closed). Measure with `camera-profile`.
     """
 
     queue_max_frames: int = 4
     drop_alarm_threshold: int = 0
     frame_timeout_s: float = 1.0
     verify_timeout_s: float = 5.0
-    reconnect_interval_s: float = 1.0
-    reconnect_max_attempts: int = 10
+    profile_timeout_s: float = 10.0
+    camera_backend: str = ""
+    camera_default_resolution: str = ""
+    camera_resolutions: tuple[str, ...] = ()
+    camera_device_label: str = ""
+
+
+# Removed keys: reported with the reason instead of a generic "unknown key".
+REMOVED_CAPTURE_KEYS = frozenset({"reconnect_interval_s", "reconnect_max_attempts"})
+REMOVED_CAPTURE_REASON = ("removed (owner decision 19/11/2026): a lost camera is never reopened automatically; "
+                          "recovery = reset-fault + a new session")
 
 
 ARTIFACT_STATUSES = frozenset({"NOT_APPROVED"})  # the only status accepted in 0.3.0 (owner, 13/11/2026)
@@ -245,6 +258,10 @@ def _build(data: dict[str, Any]) -> AppConfig:
             continue
         allowed = {f.name for f in fields(cls)}
         extra = set(raw) - allowed
+        if name == "capture" and extra & REMOVED_CAPTURE_KEYS:
+            problems.append(f"capture.{', capture.'.join(sorted(extra & REMOVED_CAPTURE_KEYS))}: "
+                            + REMOVED_CAPTURE_REASON)
+            extra -= REMOVED_CAPTURE_KEYS
         if extra:
             problems.append(f"unknown keys in [{name}]: {sorted(extra)}")
         try:
@@ -323,10 +340,12 @@ def _capture_problems(c: CaptureConfig) -> list[str]:
         p.append(f"capture.frame_timeout_s must be a number in 0.05..{CAPTURE_FRAME_TIMEOUT_MAX_S:g} (HLT-004)")
     if not _is_num(c.verify_timeout_s) or not 0.1 <= c.verify_timeout_s <= 30:
         p.append("capture.verify_timeout_s must be a number in 0.1..30")
-    if not _is_num(c.reconnect_interval_s) or not 0.01 <= c.reconnect_interval_s <= 60:
-        p.append("capture.reconnect_interval_s must be a number in 0.01..60")
-    if not _is_int(c.reconnect_max_attempts) or not 0 <= c.reconnect_max_attempts <= 1000:
-        p.append("capture.reconnect_max_attempts must be int in 0..1000")
+    if not _is_num(c.profile_timeout_s) or not 0.1 <= c.profile_timeout_s <= 60:
+        p.append("capture.profile_timeout_s must be a number in 0.1..60")
+    from acurix_edge.capture.profile import profile_problems  # capture imports config: import late
+
+    p.extend(profile_problems(c.camera_backend, c.camera_default_resolution, c.camera_resolutions,
+                              c.camera_device_label))
     return p
 
 
@@ -412,7 +431,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         return cfg
     try:
         with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+            # utf-8-sig: a BOM written by Windows tools (PowerShell 5.1, some editors) is accepted
+            data = tomllib.loads(fh.read().decode("utf-8-sig"))
     except FileNotFoundError as exc:
         raise ConfigError([f"configuration file not found: {path.name}"]) from exc
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:

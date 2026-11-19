@@ -31,6 +31,7 @@ from acurix_edge.capture.manifest import (
     validate_manifest,
     verify_session,
 )
+from acurix_edge.capture.profile import MISMATCH_MESSAGE, NOT_CONFIGURED_MESSAGE
 from acurix_edge.capture.sources import ImageFolderSource, WebcamSource
 from tests.capture_support import SyntheticCamera, write_image_folder
 from tests.support import TempDirTestCase
@@ -125,9 +126,58 @@ class BenchCaptureTests(BenchCase):
 
     def test_lost_camera_keeps_written_frames_in_manifest(self):
         cam = SyntheticCamera(frames=2)  # synthetic camera "unplugged" after 2 frames
-        r = self.run_capture(source=WebcamSource(0, capture_factory=cam.factory), frames=5)
+        r = self.run_capture(source=WebcamSource(0, capture_factory=cam.factory), frames=5,
+                             expected_profile=cam.profile())
         self.assertEqual((r.end_reason, r.frames_written), (SOURCE_LOST, 2))
         self.assertEqual(verify_session(r.session_dir)["camera"]["device"], "webcam-usb-0")
+
+    def test_webcam_without_expected_profile_is_refused_and_creates_nothing(self):
+        cam = SyntheticCamera()
+        with self.assertRaises(BenchError) as ctx:
+            self.run_capture(source=WebcamSource(0, capture_factory=cam.factory))
+        self.assertIn("AEX-CAP-001", str(ctx.exception))
+        self.assertIn(NOT_CONFIGURED_MESSAGE, str(ctx.exception))
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_other_camera_is_refused_and_creates_nothing(self):
+        expected = SyntheticCamera().profile()
+        other = SyntheticCamera(sizes=((64, 48), (128, 96)))  # same backend, other resolutions
+        src = WebcamSource(0, capture_factory=other.factory)
+        with self.assertRaises(BenchError) as ctx:
+            self.run_capture(source=src, expected_profile=expected)
+        self.assertIn(MISMATCH_MESSAGE, str(ctx.exception))
+        self.assertIn("AEX-CAP-001", str(ctx.exception))
+        self.assertFalse(src.is_open, "refused camera is released")
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_wrong_device_label_is_refused(self):
+        cam = SyntheticCamera()
+        with self.assertRaises(BenchError) as ctx:
+            self.run_capture(source=WebcamSource(0, capture_factory=cam.factory, device_label="other cam"),
+                             expected_profile=cam.profile(), device_label="other cam")
+        self.assertIn("device label", str(ctx.exception))
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_profile_backend_error_is_a_structured_refusal(self):
+        cam = SyntheticCamera()
+
+        def factory(target, *args):
+            c = cam.factory(target, *args)
+            c.getBackendName = lambda: "SYNTH"
+            c.get = mock.Mock(side_effect=[64.0, 48.0, cv2.error("driver")])  # open ok, profiling fails
+            return c
+
+        with self.assertRaises(BenchError) as ctx:
+            self.run_capture(source=WebcamSource(0, capture_factory=factory), expected_profile=cam.profile())
+        self.assertIn("AEX-CAP-001", str(ctx.exception))
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_same_camera_is_accepted_at_its_configured_size(self):
+        cam = SyntheticCamera()
+        r = self.run_capture(source=WebcamSource(0, capture_factory=cam.factory), expected_profile=cam.profile())
+        self.assertEqual((r.end_reason, r.frames_written), (COMPLETE, 3))
+        self.assertEqual(verify_session(r.session_dir)["camera"]["resolution"], "64x48",
+                         "profile measurement restores the default size before capturing")
 
     def test_invalid_frame_count(self):
         for frames in (0, -1, 10_001, True):
@@ -306,6 +356,49 @@ class CliTests(BenchCase):
                                 *[a for kv in REQUIRED_CLI.items() for a in kv])
         self.assertEqual(code, 2)
         self.assertIn("--device", err)
+
+    def webcam_args(self, *extra):
+        return ["capture", "--source", "webcam", "--device", "0", "--frames", "2", "--base-dir", str(self.tmp),
+                *[a for kv in REQUIRED_CLI.items() for a in kv], *extra]
+
+    def test_cli_webcam_requires_config_and_opens_nothing(self):
+        cam = SyntheticCamera()
+        with mock.patch("acurix_edge.capture.sources._default_webcam_factory", cam.factory):
+            code, _, err = self.cli(*self.webcam_args())
+        self.assertEqual(code, 2)
+        self.assertIn("--config", err)
+        self.assertEqual(cam.opens, 0, "refused before the camera is opened")
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_cli_camera_profile_then_capture_same_camera_ok_other_camera_refused(self):
+        cam = SyntheticCamera()
+        with mock.patch("acurix_edge.capture.sources._default_webcam_factory", cam.factory):
+            code, out, err = self.cli("camera-profile", "--device", "0", "--device-label", "Bench Cam (USB)")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["profile"]["backend"], "SYNTH")
+        self.assertEqual(result["profile"]["default_resolution"], "64x48")
+        self.assertEqual(result["profile"]["supported_resolutions"], ["96x72"])
+        cfg = self.tmp / "acurix.toml"
+        cfg.write_text("[capture]\n" + result["config_toml"], encoding="utf-8")
+        with mock.patch("acurix_edge.capture.sources._default_webcam_factory", cam.factory):
+            code, out, err = self.cli(*self.webcam_args("--config", str(cfg), "--session-id", "same-cam"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(verify_session(self.root / "same-cam")["camera"]["device"], "Bench Cam (USB)",
+                         "without --device-label the manifest names the configured camera")
+        other = SyntheticCamera(backend="OTHER")
+        with mock.patch("acurix_edge.capture.sources._default_webcam_factory", other.factory):
+            code, _, err = self.cli(*self.webcam_args("--config", str(cfg), "--session-id", "other-cam"))
+        self.assertEqual(code, 2)
+        self.assertIn(MISMATCH_MESSAGE, json.loads(err)["problems"][0])
+        self.assertNotIn("other-cam", self.session_dirs())
+
+    def test_cli_camera_profile_unavailable_camera(self):
+        with mock.patch("acurix_edge.capture.sources._default_webcam_factory",
+                        SyntheticCamera(open_ok=False).factory):
+            code, _, err = self.cli("camera-profile", "--device", "0", "--device-label", "X")
+        self.assertEqual(code, 2)
+        self.assertIn("AEX-CAP-001", err)
 
     def test_cli_verify_reports_invalid(self):
         (self.tmp / "s").mkdir()

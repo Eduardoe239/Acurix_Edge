@@ -17,11 +17,12 @@ opened when `open()` is called on a `WebcamSource` — nothing here opens it imp
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import cv2
 import numpy as np
@@ -29,6 +30,10 @@ import numpy.typing as npt
 
 from acurix_edge.contracts.errors import ErrorCode
 
+if TYPE_CHECKING:
+    from acurix_edge.capture.profile import CameraProfile
+
+_log = logging.getLogger("acurix_edge.capture")
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
 Image = npt.NDArray[np.uint8]  # 8-bit image as delivered by OpenCV (BGR, BGRA or gray)
 
@@ -165,27 +170,37 @@ class _VideoCaptureSource:
             raise SourceOpenError(f"{self.source_id}: could not be opened")
         self._cap, self._ended = cap, False
 
-    def _grab(self) -> tuple[bool, Any]:
+    def _pin(self, what: str) -> Any:
+        """Mark a native operation in flight on the CURRENT capture object and return it. Until
+        `_unpin`, close() defers its release (never released during a native call). Native calls
+        on the pinned object run OUTSIDE `_io_lock` (a driver call may block)."""
         with self._io_lock:
             cap = self._cap
             if cap is None:
-                raise SourceError(f"{self.source_id}: read on a closed source")
+                raise SourceError(f"{self.source_id}: {what} on a closed source")
             self._reading[id(cap)] = self._reading.get(id(cap), 0) + 1
+            return cap
+
+    def _unpin(self, cap: Any) -> None:
+        release_now = None
+        with self._io_lock:
+            left = self._reading[id(cap)] - 1
+            if left:
+                self._reading[id(cap)] = left
+            else:
+                del self._reading[id(cap)]
+                release_now = self._deferred.pop(id(cap), None)
+        if release_now is not None:
+            _release(release_now)
+
+    def _grab(self) -> tuple[bool, Any]:
+        cap = self._pin("read")
         try:
             ok, image = cap.read()
         except Exception as exc:
             raise SourceLostError(f"{self.source_id}: read failed ({type(exc).__name__})") from exc
         finally:
-            release_now = None
-            with self._io_lock:
-                left = self._reading[id(cap)] - 1
-                if left:
-                    self._reading[id(cap)] = left
-                else:
-                    del self._reading[id(cap)]
-                    release_now = self._deferred.pop(id(cap), None)
-            if release_now is not None:
-                _release(release_now)
+            self._unpin(cap)
         if self._cap is not cap:
             raise SourceError(f"{self.source_id}: source closed during read")
         return bool(ok) and image is not None, image
@@ -238,25 +253,83 @@ def _default_webcam_factory(index: int) -> Any:
 
 class WebcamSource(_VideoCaptureSource):
     """USB/UVC webcam by device index. Live: a failed read is a LOSS (SourceLostError).
-    Opening this source turns the real camera on: only with the owner's authorization."""
+    Opening this source turns the real camera on: only with the owner's authorization.
+
+    A device index is NOT an identity: DirectShow renumbers cameras when one is unplugged. The
+    camera profile (`measure_profile`, capture/profile.py) is checked on every open."""
 
     live = True
 
     def __init__(self, device_index: int, *, width: int | None = None, height: int | None = None,
-                 source_id: str | None = None, capture_factory: CaptureFactory | None = None) -> None:
+                 source_id: str | None = None, capture_factory: CaptureFactory | None = None,
+                 device_label: str | None = None,
+                 profile_candidates: tuple[tuple[int, int], ...] | None = None) -> None:
         if isinstance(device_index, bool) or not isinstance(device_index, int) or device_index < 0:
             raise ValueError("device_index must be int >= 0")
         self.device_index = device_index
         self._size = (width, height)
         super().__init__(device_index, source_id or f"webcam-usb-{device_index}",
                          capture_factory or _default_webcam_factory)
+        self.device_label = device_label if device_label is not None else self.source_id
+        self._candidates = profile_candidates
+        self._backend = "UNKNOWN"
+        self._default_size = (0, 0)
 
     def _configure(self, cap: Any) -> None:
-        width, height = self._size
+        # Recorded BEFORE any size is requested: the camera's own default is part of its profile.
+        try:
+            self._backend = str(cap.getBackendName()) or "UNKNOWN"
+        except Exception:  # a backend that cannot name itself does not match any expected profile
+            self._backend = "UNKNOWN"
+        self._default_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        self._apply_size(cap, *self._size)
+
+    @staticmethod
+    def _apply_size(cap: Any, width: int | None, height: int | None) -> None:
         if width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
         if height:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+
+    def measure_profile(self) -> CameraProfile:
+        """Profile of the open camera: backend, default size, the size the driver NEGOTIATES for
+        each of a fixed list of requests (set + get; no frame is read — verified equal to the read
+        frame size on DirectShow, 19/11/2026), configured device label. The configured size (or the
+        default) is restored before returning.
+
+        The capture object is pinned for the whole measurement: native calls run outside the lock,
+        and if the source is closed/reopened meanwhile (e.g. after a verification timeout) the
+        measurement aborts and never touches the NEW capture object (review M1/M2)."""
+        from acurix_edge.capture.profile import PROFILE_CANDIDATES, CameraProfile, resolution, sort_resolutions
+
+        cap = self._pin("measure_profile")
+        backend, (dw, dh) = self._backend, self._default_size  # values of THIS capture object
+        delivered: set[str] = set()
+        try:
+            if dw <= 0 or dh <= 0:
+                raise SourceOpenError(f"{self.source_id}: driver did not report a default resolution; "
+                                      "camera cannot be profiled")
+            for w, h in self._candidates or PROFILE_CANDIDATES:
+                if self._cap is not cap:
+                    raise SourceError(f"{self.source_id}: source closed during profile measurement")
+                self._apply_size(cap, w, h)
+                got_w, got_h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if got_w > 0 and got_h > 0:
+                    delivered.add(resolution(got_w, got_h))
+            if self._cap is not cap:
+                raise SourceError(f"{self.source_id}: source closed during profile measurement")
+        finally:
+            try:
+                if self._cap is cap:
+                    width, height = self._size
+                    try:
+                        self._apply_size(cap, width or dw or None, height or dh or None)
+                    except Exception:  # never mask the original error nor skip _unpin (review 2, M-1)
+                        _log.warning("camera size restore after profiling failed",
+                                     extra={"code": ErrorCode.CAP_001.value, "ctx": {"source": self.source_id}})
+            finally:
+                self._unpin(cap)
+        return CameraProfile(backend, resolution(dw, dh), sort_resolutions(delivered), self.device_label)
 
     def read(self) -> Image | None:
         ok, image = self._grab()
