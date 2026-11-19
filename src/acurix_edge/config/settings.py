@@ -126,7 +126,8 @@ class QualityConfig:
     ROI = product template, as fractions of the frame (resolution independent).
     Exposure metrics use the whole frame; focus, reflection and position use the ROI."""
 
-    version: str = "0.1.0"
+    # 0.2.0 (owner, 19/11/2026): + max_object_outside_px = 15 (0.1.0 had no tolerance: 0 px).
+    version: str = "0.2.0"
     status: str = "provisional"
     roi_x: float = 0.15
     roi_y: float = 0.10
@@ -150,6 +151,15 @@ class QualityConfig:
     border_inset_px: int = 3             # the border band is sampled this many px INSIDE the frame edge
                                          # (cheap webcams often have a dead/colored edge row or column)
     max_object_rotation_deg: float = 10.0  # product axis vs image axes (Anexo 04A §3.3: ±10°)
+    # PROVISIONAL (owner, 19/11/2026): px of the piece allowed outside the template ROI. 0 px was too
+    # strict for a real camera (manual placement, jitter). Calibrate in the optical test (Anexo 04A §3.2).
+    max_object_outside_px: float = 15.0
+
+
+# Fields added after 0.1.0, with the value that reproduces the 0.1.0 behaviour. They are left out of
+# the fingerprint while they hold that value, so the hash of an existing 0.1.0 envelope never changes.
+ENVELOPE_LEGACY_VALUES: dict[str, Any] = {"max_object_outside_px": 0.0}
+LEGACY_ENVELOPE_VERSION = "0.1.0"
 
 
 def envelope_fingerprint(q: QualityConfig) -> tuple[str, str]:
@@ -161,6 +171,8 @@ def envelope_fingerprint(q: QualityConfig) -> tuple[str, str]:
         v = getattr(q, f.name)
         if isinstance(getattr(defaults, f.name), float) and isinstance(v, int) and not isinstance(v, bool):
             v = float(v)
+        if f.name in ENVELOPE_LEGACY_VALUES and v == ENVELOPE_LEGACY_VALUES[f.name]:
+            continue  # same hash as before the field existed
         canonical[f.name] = v
     digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return str(q.version), digest.hexdigest()
@@ -267,8 +279,14 @@ def _build(data: dict[str, Any]) -> AppConfig:
             extra -= REMOVED_CAPTURE_KEYS
         if extra:
             problems.append(f"unknown keys in [{name}]: {sorted(extra)}")
+        values = {k: v for k, v in raw.items() if k in allowed}
+        if name == "quality" and values.get("version") == LEGACY_ENVELOPE_VERSION:
+            # A file pinned to envelope 0.1.0 keeps the 0.1.0 limits for the fields 0.1.0 did not have
+            # (same version must mean the same limits: QG-003).
+            for key, legacy in ENVELOPE_LEGACY_VALUES.items():
+                values.setdefault(key, legacy)
         try:
-            sections[name] = cls(**{k: v for k, v in raw.items() if k in allowed})
+            sections[name] = cls(**values)
         except TypeError as exc:
             problems.append(f"[{name}]: {exc}")
     if problems:
@@ -384,6 +402,8 @@ def _quality_problems(q: QualityConfig) -> list[str]:
         p.append("quality.border_inset_px must be int in 0..50")
     if not _frac(q.max_object_rotation_deg, 0.5, 45):
         p.append("quality.max_object_rotation_deg must be a number in 0.5..45")
+    if not _frac(q.max_object_outside_px, 0, 100):
+        p.append("quality.max_object_outside_px must be a number in 0..100 (px outside the template ROI)")
     if not (_frac(q.min_brightness, 0, 255) and _frac(q.max_brightness, 0, 255)
             and q.min_brightness < q.max_brightness):
         p.append("quality.min_brightness < max_brightness, both in 0..255")

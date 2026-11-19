@@ -26,6 +26,8 @@ SYNTHETIC_SOURCE_ID = "demo-sintetico"
 WIDTH, HEIGHT = 640, 480
 FRAME_PERIOD_S = 1 / 15
 CYCLE_S = 20.0
+SUBPIXEL_SHIFT = 4
+SUBPIXEL = 1 << SUBPIXEL_SHIFT
 
 
 def scene_angle_deg(t: float) -> tuple[float, int]:
@@ -43,8 +45,9 @@ def render_scene(t: float, rng: np.random.Generator) -> Any:
     img = np.full((HEIGHT, WIDTH), 90, np.uint8)
     cx, cy = WIDTH // 2 + dx, HEIGHT // 2
     cv2.rectangle(img, (cx - 150, cy - 110), (cx + 150, cy + 110), 175, -1)  # box
-    box = cv2.boxPoints(((cx, cy), (180, 60), -angle)).astype(np.int32)
-    cv2.fillPoly(img, [box], 70)  # label
+    # Label: anti-aliased, sub-pixel corners (shift=4 -> 1/16 px), so its edges look like a camera's.
+    box = np.round(cv2.boxPoints(((cx, cy), (180, 60), -angle)) * SUBPIXEL).astype(np.int32)
+    cv2.fillPoly(img, [box], 70, lineType=cv2.LINE_AA, shift=SUBPIXEL_SHIFT)
     noisy = img.astype(np.int16) + rng.normal(0, 4, img.shape).astype(np.int16)
     return cv2.cvtColor(np.clip(noisy, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
 

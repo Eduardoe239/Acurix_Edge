@@ -11,7 +11,7 @@
 </head>
 <body class="ax">
   <!--SIMULATED-SOURCE-BANNER-->
-  <header class="ax-strip" aria-label="Status do sistema">
+  <header class="ax-strip bv-strip" aria-label="Status do sistema">
     <span class="ax-strip__item bv-ident"><b>Acurix Edge · Visualizador de bancada</b><span class="ax-limit__scale bv-caption">ferramenta de desenvolvimento</span></span>
     <span class="ax-strip__item"><span id="cam-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Câmera <b id="cam">—</b></span>
     <span class="ax-strip__item"><span id="sys-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Sistema <b id="sys">—</b></span>
@@ -44,27 +44,27 @@
     </section>
 
     <aside class="bv-side">
-      <section class="ax-card">
+      <section class="ax-card" id="card-verdict">
         <h2 class="ax-card__title">Veredito do sistema</h2>
         <span id="verdict" class="ax-verdict ax-verdict--none ax-verdict--hero">NO_DECISION</span>
         <p id="verdict-phrase" class="bv-note">O sistema ainda não decide: especialista em validação</p>
         <p id="verdict-reason" class="bv-note"></p>
       </section>
 
-      <section class="ax-card">
-        <h2 class="ax-card__title">Porta de qualidade · <span id="q-status" class="ax-num">—</span></h2>
-        <div id="q-bars" class="bv-stack"></div>
-      </section>
-
-      <section class="ax-card">
+      <section class="ax-card" id="card-shadow">
         <h2 class="ax-card__title">Prévia (modo sombra) — não decide</h2>
         <div id="s-bar" class="bv-stack"></div>
         <p id="s-text" class="bv-note"></p>
       </section>
 
-      <section class="ax-card">
+      <section class="ax-card" id="card-trail">
         <h2 class="ax-card__title">Trilha da decisão</h2>
         <div id="trail" class="ax-trail"></div>
+      </section>
+
+      <section class="ax-card" id="card-quality">
+        <h2 class="ax-card__title">Porta de qualidade · <span id="q-status" class="ax-num">—</span></h2>
+        <div id="q-bars" class="bv-stack"></div>
       </section>
     </aside>
   </main>

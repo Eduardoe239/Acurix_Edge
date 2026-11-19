@@ -125,7 +125,7 @@ class QualityGateTests(unittest.TestCase):
                         "object_rotation_deg"):
                 self.assertIn(key, r.metrics)
             self.assertEqual((r.envelope_version, r.envelope_status, r.envelope_validated),
-                             ("0.1.0", "provisional", False))
+                             ("0.2.0", "provisional", False))
             self.assertGreaterEqual(r.elapsed_ms, 0.0)
             json.dumps(r.to_dict(), allow_nan=False)
 
@@ -175,17 +175,17 @@ class EnvelopeAuditTests(EnvelopeAppCase):
         a = self.app(base)
         first = self.actions(a)
         self.assertEqual([r["action"] for r in first], ["QUALITY_ENVELOPE_ACTIVATED"])
-        self.assertEqual(first[0]["detail"]["version"], "0.1.0")
+        self.assertEqual(first[0]["detail"]["version"], "0.2.0")
         self.assertFalse(first[0]["detail"]["validated"])
         a.shutdown()
         a = self.app(base)  # same envelope: nothing new
         self.assertEqual(len(self.actions(a)), 1)
         a.shutdown()
-        changed = dataclasses.replace(base, quality=dataclasses.replace(base.quality, version="0.1.1",
+        changed = dataclasses.replace(base, quality=dataclasses.replace(base.quality, version="0.2.1",
                                                                          min_sharpness=55.0))
         a = self.app(changed)
         self.assertEqual(self.actions(a)[0]["action"], "QUALITY_ENVELOPE_CHANGED")
-        self.assertEqual(self.actions(a)[0]["detail"]["previous"]["version"], "0.1.0")
+        self.assertEqual(self.actions(a)[0]["detail"]["previous"]["version"], "0.2.0")
         a.shutdown()
         # limit changed WITHOUT a new version -> refused, visible in health, frames refused
         sneaky = dataclasses.replace(changed, quality=dataclasses.replace(changed.quality, min_sharpness=10.0))
@@ -212,7 +212,7 @@ class EnvelopeAuditTests(EnvelopeAppCase):
 
         for cfg in (base, with_q(version="0.1.1", min_sharpness=55.0)):
             self.app(cfg).shutdown()
-        a = self.app(with_q(min_sharpness=12.0))  # back to 0.1.0 but with different limits
+        a = self.app(with_q(min_sharpness=12.0))  # back to the default version but with different limits
         self.assertEqual(self.actions(a)[0]["action"], "QUALITY_ENVELOPE_REJECTED")
         self.assertIsNotNone(a._envelope_conflict)
         a.shutdown()
@@ -451,7 +451,7 @@ class FrameIntegrationTests(FrameAppCase):
         self.assertEqual(ev.inference_status, "INPUT_INVALID")
         self.assertEqual(ev.extra["quality"]["status"], "INPUT_INVALID")
         self.assertEqual(ev.extra["quality"]["reasons"][0]["code"], "FOCUS_LOW")
-        self.assertEqual(ev.extra["quality"]["envelope_version"], "0.1.0")
+        self.assertEqual(ev.extra["quality"]["envelope_version"], "0.2.0")
         self.assertNotIn("stages", ev.extra)
 
     def test_valid_frame_runs_the_unapproved_specialist_in_shadow_and_records_it(self):
@@ -642,7 +642,7 @@ class GateFailureHealthTests(FrameAppCase):  # review round 2, L-d
 class EnvelopeHistoryTests(EnvelopeAppCase):
     def test_corrupted_history_has_its_own_message(self):  # review round 2, L-c
         a = self.app(AppConfig())
-        a.store.audit(actor_ref="system", action="QUALITY_ENVELOPE_ACTIVATED", target="quality@0.1.0",
+        a.store.audit(actor_ref="system", action="QUALITY_ENVELOPE_ACTIVATED", target="quality@0.2.0",
                       detail={"broken": True})
         a.shutdown()
         a = self.app(AppConfig())

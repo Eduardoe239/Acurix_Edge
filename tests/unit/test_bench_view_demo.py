@@ -112,7 +112,7 @@ class DemoServerTests(DemoCase):
         banner = re.search(r'<div class="ax-banner ax-banner--p2 bv-simulated" role="note">([^<]+)</div>', text)
         self.assertIsNotNone(banner)
         self.assertEqual(banner.group(1), NOTICE)
-        self.assertLess(banner.start(), text.index('<header class="ax-strip"'), "banner is the first thing on top")
+        self.assertLess(banner.start(), text.index('<header class="ax-strip'), "banner is the first thing on top")
         self.assertIn('<div class="bv-sim-tag" aria-hidden="true">FONTE SIMULADA</div>', text)
         self.assertNotIn("<!--SIMULATED-SOURCE", text)
         css = (STATIC_DIR / "viewer.css").read_text(encoding="utf-8")

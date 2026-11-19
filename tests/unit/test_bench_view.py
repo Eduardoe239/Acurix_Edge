@@ -411,7 +411,7 @@ class ViewModelTests(unittest.TestCase):
         pos, rot = self.bar(shifted, "Posição"), self.bar(shifted, "Rotação do produto")
         self.assertEqual(pos["value_text"], "166 px")
         self.assertTrue(pos["attention"])
-        self.assertEqual(pos["detail"], "limite 0 px · peça deslocada para fora do gabarito")
+        self.assertEqual(pos["detail"], "limite 15 px · peça deslocada para fora do gabarito")
         self.assertEqual(pos["scale_text"], ["0 px", "100+ px"])
         self.assertEqual(rot["value_text"], "—", "never 0,0° when the refusal is a displacement")
         self.assertIsNone(rot["value_pct"], "no marker for a value that was not evaluated")
@@ -421,7 +421,13 @@ class ViewModelTests(unittest.TestCase):
             "object_area_fraction_roi": 0.4, "object_outside_roi_px": 0.0, "object_rotation_measured": 1.0,
             "object_rotation_deg": -2.4, "object_rotation_abs_deg": 2.4})
         self.assertEqual(self.bar(inside, "Posição")["value_text"], "0 px")
-        self.assertEqual(self.bar(inside, "Posição")["detail"], "limite 0 px · dentro do gabarito")
+        self.assertEqual(self.bar(inside, "Posição")["detail"], "limite 15 px · dentro do gabarito")
+        tolerated = self.quality("VALID", {
+            "object_area_fraction_roi": 0.4, "object_outside_roi_px": 9.0, "object_rotation_measured": 1.0,
+            "object_rotation_deg": 1.0, "object_rotation_abs_deg": 1.0})
+        self.assertEqual(self.bar(tolerated, "Posição")["detail"], "limite 15 px · dentro da tolerância")
+        self.assertEqual(self.bar(tolerated, "Rotação do produto")["value_text"], "1,0°")
+        self.assertFalse(self.bar(tolerated, "Posição")["attention"])
         self.assertEqual(self.bar(inside, "Rotação do produto")["value_text"], "-2,4°")
         self.assertEqual(self.bar(inside, "Rotação do produto")["detail"], "limite 10°")
         missing = self.quality("INPUT_INVALID", {"object_area_fraction_roi": 0.0},
@@ -464,6 +470,24 @@ class ViewModelTests(unittest.TestCase):
                                     quality_reasons=q_reasons)
                 self.assertEqual(v["reason"], text)
                 self.assertNotIn("fora de observação", v["reason"])
+
+    def test_all_refusal_reasons_in_order_of_importance(self):  # final review, item 2
+        gate_order = [("FOCUS_LOW", "sharpness_laplacian_var"), ("REFLECTION", "specular_fraction_roi"),
+                      ("BACKGROUND_NOT_UNIFORM", "border_outlier_fraction"),
+                      ("OBJECT_OUTSIDE_ROI", "object_outside_roi_px")]
+        v = self.quality("INPUT_INVALID", {"object_area_fraction_roi": 0.4, "object_outside_roi_px": 80.0},
+                         reasons=gate_order)
+        expected = ["Peça fora da área do gabarito", "Fundo não uniforme", "Imagem sem foco", "Reflexo na peça"]
+        self.assertEqual(v["reasons"], expected, "position first, then framing, then image")
+        s = vm.build_status(system_state="DEGRADED", camera_status="OK", latency_p95_ms=None, fps=None,
+                            ram_free_gb=None, quality_config=self.Q, result="NO_DECISION", reason="INPUT_QUALITY",
+                            detail={"quality": {"status": "INPUT_INVALID", "metrics": {},
+                                                "reasons": [{"code": c, "metric": m} for c, m in gate_order]}},
+                            frame_size=None, problem=None, problem_code=None, frames_processed=1, running=True)
+        self.assertEqual(s["verdict"]["reason"], "Imagem recusada pela porta de qualidade: " + "; ".join(expected))
+        self.assertEqual(s["quality"]["reasons"], expected)  # the image strip shows this full list
+        self.assertEqual(s["trail"][0]["detail"], "; ".join(expected))
+        self.assertEqual(vm.ordered_reason_codes(["X_NEW", "FOCUS_LOW", "Y_NEW"]), ["FOCUS_LOW", "X_NEW", "Y_NEW"])
 
     def test_health_phrase_never_states_a_cause_the_status_does_not_support(self):  # review 003, M1
         cases = {
@@ -555,9 +579,22 @@ class StaticAssetTests(unittest.TestCase):
         self.assertIn("<!--PRIVACY-NOTICE-->", html)  # filled by the server per mode (see ServedPageTests)
         self.assertIn("Luís Eduardo de Sousa Barbosa", html)
 
+    def test_right_column_order_and_strip_wraps(self):  # final review, items 1 and 3
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        aside = html[html.index('<aside class="bv-side">'):html.index("</aside>")]
+        order = [aside.index(f'id="card-{c}"') for c in ("verdict", "shadow", "trail", "quality")]
+        self.assertEqual(order, sorted(order), "Veredito -> Prévia -> Trilha -> Porta de qualidade")
+        self.assertIn('<header class="ax-strip bv-strip"', html)
+        css = (STATIC_DIR / "viewer.css").read_text(encoding="utf-8")
+        strip = re.search(r"\.bv-strip\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(strip)
+        self.assertIn("flex-wrap: wrap", strip.group(1))
+        self.assertIn("height: auto", strip.group(1))
+        self.assertRegex(css, r"\.bv-strip \.ax-btn\s*\{[^}]*flex:\s*none")
+
     def test_identification_at_the_start_of_the_status_strip(self):  # item 4
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        strip = html[html.index('<header class="ax-strip"'):html.index("</header>")]
+        strip = html[html.index('<header class="ax-strip bv-strip"'):html.index("</header>")]
         first = strip[strip.index("<span"):]
         self.assertTrue(first.startswith('<span class="ax-strip__item bv-ident"><b>Acurix Edge · Visualizador '
                                          'de bancada</b><span class="ax-limit__scale bv-caption">ferramenta de '

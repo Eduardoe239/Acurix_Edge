@@ -11,6 +11,17 @@
 
 body { margin: 0; background: var(--bg-canvas); }
 
+/* Faixa de status: quebra linha quando não cabe; o botão Encerrar nunca é cortado. */
+.bv-strip {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: var(--statusbar-h);
+  row-gap: var(--space-1);
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+.bv-strip .ax-btn { flex: none; }
+
 .bv-hidden { display: none !important; }
 
 .bv-banner { margin: var(--space-4) var(--space-4) 0; }

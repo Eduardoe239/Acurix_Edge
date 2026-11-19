@@ -16,7 +16,7 @@ Deterministic, OpenCV only. Checks (each failure is a reason with metric, value 
               (both catch wrong framing: camera too close, object or clutter on the border)
               no object, or object area / ROI area               < min_object_fraction  -> OBJECT_NOT_FOUND
               object area / ROI area                             > max_object_fraction  -> OBJECT_TOO_LARGE
-              object bounding box not entirely inside the ROI    (pixels outside > 0)   -> OBJECT_OUTSIDE_ROI
+              object bounding box outside the ROI by           > max_object_outside_px -> OBJECT_OUTSIDE_ROI
               |object axis vs image axes| (mod 90°)              > max_object_rotation_deg -> OBJECT_ROTATED
               Limit: a round object has no axis; its rotation reads the min-area rectangle (provisional).
 
@@ -196,8 +196,8 @@ class QualityGate:
         else:
             if obj_fraction > q.max_object_fraction:
                 fail("OBJECT_TOO_LARGE", "object_area_fraction_roi", Comparison.ABOVE_MAX, q.max_object_fraction)
-            if outside_px > 0:
-                fail("OBJECT_OUTSIDE_ROI", "object_outside_roi_px", Comparison.ABOVE_MAX, 0.0)
+            if outside_px > q.max_object_outside_px:  # envelope 0.2.0: provisional tolerance (0.1.0: 0 px)
+                fail("OBJECT_OUTSIDE_ROI", "object_outside_roi_px", Comparison.ABOVE_MAX, q.max_object_outside_px)
             if rotation_measured and abs(rotation) > q.max_object_rotation_deg:  # review M3 (Anexo 04A §3.3)
                 fail("OBJECT_ROTATED", "object_rotation_abs_deg", Comparison.ABOVE_MAX, q.max_object_rotation_deg)
 

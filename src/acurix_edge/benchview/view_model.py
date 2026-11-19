@@ -68,9 +68,23 @@ DECISION_REASON_PT = {  # reasons that do not depend on the system state
     "EVENT_RECORD_CORRUPT": "Registro de evento corrompido",
     "IDEMPOTENCY_CONFLICT": "Inspeção repetida com conteúdo diferente",
 }
-# Quality gate rule (vision/quality_gate.py): any px of the piece outside the template ROI fails.
-OUTSIDE_LIMIT_PX = 0.0
 POSITION_SCALE_PX = 100.0  # bar scale for the displacement (values above are clamped: "100+ px")
+# Order of importance of the quality-gate refusal reasons (owner, 19/11/2026: position first).
+# A gate error means nothing was measured, so it leads; unknown codes go last, in gate order.
+QUALITY_REASON_ORDER = (
+    "QUALITY_GATE_ERROR", "OBJECT_OUTSIDE_ROI", "OBJECT_NOT_FOUND", "OBJECT_TOO_LARGE", "OBJECT_ROTATED",
+    "BACKGROUND_OUT_OF_RANGE", "BACKGROUND_NOT_UNIFORM", "FOCUS_LOW", "UNDEREXPOSED", "OVEREXPOSED",
+    "CRUSHED_SHADOWS", "BLOWN_HIGHLIGHTS", "REFLECTION",
+)
+
+
+def ordered_reason_codes(codes: Sequence[str]) -> list[str]:
+    """Distinct codes, most important first; unknown codes last, in the gate's own order."""
+    rank = {c: i for i, c in enumerate(QUALITY_REASON_ORDER)}
+    first_seen = {c: i for i, c in reversed(list(enumerate(codes)))}
+    return sorted(first_seen, key=lambda c: (rank.get(c, len(rank)), first_seen[c]))
+
+
 STATE_REASONS = frozenset({"SYSTEM_NOT_OBSERVING", "HEALTH_NOT_OK"})  # explained by the REAL health entries
 HealthIssue = tuple[str, str] | tuple[str, str, str]  # (entry name, status[, AEX code])
 # Shop-floor phrase chosen by (entry, status, AEX code) — never by the name alone (review 003, M1):
@@ -161,9 +175,9 @@ def reason_text(reason: str | None, system_state: str, health_issues: Sequence[H
                 quality_reasons: Sequence[str]) -> str:
     if system_state in ("IDLE", "FAULT"):  # the current state wins over the last frame's reason
         return state_reason(system_state, health_issues)
-    if reason == "INPUT_QUALITY":
-        first = quality_reasons[0] if quality_reasons else ""
-        return "Imagem recusada pela porta de qualidade" + (f": {first}" if first else "")
+    if reason == "INPUT_QUALITY":  # ALL reasons, most important first (owner, 19/11/2026)
+        listed = "; ".join(quality_reasons)
+        return "Imagem recusada pela porta de qualidade" + (f": {listed}" if listed else "")
     if reason in STATE_REASONS:
         return state_reason(system_state, health_issues)
     return DECISION_REASON_PT.get(reason or "", reason or "")
@@ -192,7 +206,9 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
         return {"status": "—", "valid": None, "reasons": [], "bars": [], "roi": None}
     metrics: Mapping[str, float] = quality.get("metrics") or {}
     failing = {str(r.get("metric")) for r in quality.get("reasons") or []}
-    reasons = [QUALITY_REASON_PT.get(str(r.get("code")), str(r.get("code"))) for r in quality.get("reasons") or []]
+    codes = ordered_reason_codes([str(r.get("code")) for r in quality.get("reasons") or []])
+    reasons = [QUALITY_REASON_PT.get(c, c) for c in codes]  # ALL reasons, most important first
+    outside_limit = float(q.max_object_outside_px)
 
     def m(key: str) -> float:
         v = metrics.get(key, float("nan"))
@@ -202,17 +218,18 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
     bright_frac, dark_frac = m("bright_fraction"), m("dark_fraction")
     outside = m("object_outside_roi_px")
     found = m("object_area_fraction_roi") >= q.min_object_fraction
-    # Position = displacement of the piece relative to the template, in px (limit from the gate: 0 px).
+    # Position = displacement of the piece relative to the template, in px (limit: envelope
+    # max_object_outside_px; 15 px in 0.2.0, 0 px in 0.1.0).
     if not found:
         position_value, position_text, position_detail = math.nan, "—", "peça não encontrada no gabarito"
     else:
         position_value, position_text = max(0.0, outside), f"{fmt(max(0.0, outside), 0)} px"
-        position_detail = ("dentro do gabarito" if outside <= OUTSIDE_LIMIT_PX
-                           else "peça deslocada para fora do gabarito")
-    # Product rotation: only shown when it was really measured on a piece fully inside the template.
+        position_detail = ("dentro do gabarito" if outside <= 0 else "dentro da tolerância"
+                           if outside <= outside_limit else "peça deslocada para fora do gabarito")
+    # Product rotation: only shown when it was really measured on a piece inside the template tolerance.
     if not found:
         rotation_value, rotation_text, rotation_detail = math.nan, "—", "não medida: peça não encontrada"
-    elif outside > OUTSIDE_LIMIT_PX:
+    elif outside > outside_limit:
         rotation_value, rotation_text, rotation_detail = math.nan, "—", "não avaliada: peça fora do gabarito"
     elif m("object_rotation_measured") < 1:
         rotation_value, rotation_text, rotation_detail = math.nan, "—", "não medida: contorno pouco retangular"
@@ -220,7 +237,7 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
         rotation_value = m("object_rotation_abs_deg")
         rotation_text = f"{fmt(m('object_rotation_deg'))}°"
         rotation_detail = f"limite {fmt_limit(q.max_object_rotation_deg)}°"
-    position_hi = max(POSITION_SCALE_PX, OUTSIDE_LIMIT_PX * 2)
+    position_hi = max(POSITION_SCALE_PX, outside_limit * 2)
     bars = [
         limit_bar("Nitidez", m("sharpness_laplacian_var"), fmt(m("sharpness_laplacian_var"), 0),
                   scale=(0, sharp_hi), thresholds=[q.min_sharpness], band=(q.min_sharpness, sharp_hi),
@@ -237,10 +254,10 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
                   scale_text=("0 %", f"{fmt(q.max_bright_fraction * 200, 0)} %"),
                   detail=f"limite {fmt_limit(q.max_bright_fraction * 100)} % · sombras {fmt(dark_frac * 100)} %"),
         limit_bar("Posição", position_value, position_text, scale=(0, position_hi),
-                  thresholds=[OUTSIDE_LIMIT_PX], band=(0, OUTSIDE_LIMIT_PX),
+                  thresholds=[outside_limit], band=(0, outside_limit),
                   attention=bool(failing & {"object_outside_roi_px", "object_area_fraction_roi"}),
                   scale_text=("0 px", f"{fmt(position_hi, 0)}+ px"),
-                  detail=f"limite {fmt_limit(OUTSIDE_LIMIT_PX)} px · {position_detail}"),
+                  detail=f"limite {fmt_limit(outside_limit)} px · {position_detail}"),
         limit_bar("Rotação do produto", rotation_value, rotation_text, scale=(0, q.max_object_rotation_deg * 2),
                   thresholds=[q.max_object_rotation_deg], band=(0, q.max_object_rotation_deg),
                   attention="object_rotation_abs_deg" in failing,
@@ -316,7 +333,7 @@ def trail_view(quality: Mapping[str, Any], shadow: Mapping[str, Any], verdict: M
     else:
         reasons = quality.get("reasons") or []
         q_step = {"kind": "warn", "name": "Qualidade da imagem",
-                  "detail": "; ".join(str(r) for r in reasons[:2]), "value": "INPUT_INVALID"}
+                  "detail": "; ".join(str(r) for r in reasons), "value": "INPUT_INVALID"}
     return [
         q_step,
         {"kind": "skip", "name": "Anomalia", "detail": "não implementada", "value": "—"},
