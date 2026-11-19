@@ -1,0 +1,93 @@
+/* Acurix Edge — componentes base. Lê apenas variáveis de tokens.css. Nenhuma cor solta. */
+
+.ax { font-family: var(--font-sans); color: var(--text-primary); -webkit-font-smoothing: antialiased; }
+.ax *, .ax *::before, .ax *::after { box-sizing: border-box; }
+.ax-num { font-variant-numeric: tabular-nums; }
+.ax-icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ax-icon--lg { width: 28px; height: 28px; stroke-width: 2.25; }
+
+/* ---------- Button ---------- */
+.ax-btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  height: var(--control-md); padding: 0 var(--space-4); border-radius: var(--radius-md);
+  font: 600 14px/1 var(--font-sans); border: 1px solid transparent; cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease; white-space: nowrap; }
+.ax-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ax-btn--primary { background: var(--action-primary); color: var(--on-action); }
+.ax-btn--primary:hover { background: var(--action-primary-hover); }
+.ax-btn--secondary { background: var(--bg-surface); color: var(--text-primary); border-color: var(--border-control); }
+.ax-btn--secondary:hover { background: var(--action-subtle); }
+.ax-btn--ghost { background: transparent; color: var(--action-primary); }
+.ax-btn--ghost:hover { background: var(--action-subtle); }
+.ax-btn--danger { background: var(--bg-surface); color: var(--state-fault); border-color: var(--state-fault); }
+.ax-btn--lg { height: var(--control-lg); padding: 0 var(--space-6); font-size: 15px; }
+.ax-btn[disabled] { background: var(--bg-sunken); color: var(--text-muted); border-color: transparent; cursor: not-allowed; }
+
+/* ---------- VerdictBadge ---------- */
+.ax-verdict { display: inline-flex; align-items: center; gap: var(--space-2); height: 28px; padding: 0 var(--space-3);
+  border-radius: var(--radius-sm); font: 600 13px/1 var(--font-sans); letter-spacing: .02em; border: 1px solid currentColor; }
+.ax-verdict--pass   { color: var(--state-ok);     background: var(--state-ok-bg); }
+.ax-verdict--review { color: var(--state-review); background: var(--state-review-bg); }
+.ax-verdict--defect { color: var(--state-fault);  background: var(--state-fault-bg); }
+.ax-verdict--none   { color: var(--state-idle);   background: var(--state-idle-bg); border-style: dashed; }
+.ax-verdict--hero { height: auto; padding: var(--space-4) var(--space-6); gap: var(--space-3); border-radius: var(--radius-lg);
+  font: 650 40px/44px var(--font-sans); letter-spacing: 0; border-width: 2px; }
+.ax-verdict--solid.ax-verdict--defect { background: var(--state-fault); color: var(--on-state); border-color: var(--state-fault); }
+
+/* ---------- StatusStrip ---------- */
+.ax-strip { display: flex; align-items: center; gap: var(--space-6); height: var(--statusbar-h); padding: 0 var(--space-4);
+  background: var(--bg-surface); border-bottom: 1px solid var(--border-subtle); font: 500 13px/18px var(--font-sans); color: var(--text-secondary); }
+.ax-strip__item { display: inline-flex; align-items: center; gap: var(--space-2); white-space: nowrap; }
+.ax-strip__item b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ax-strip__spacer { flex: 1; }
+.ax-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--state-ok); flex: none; }
+.ax-dot--review { background: var(--state-review); border-radius: 1px; transform: rotate(45deg); }
+.ax-dot--fault { background: var(--state-fault); border-radius: 1px; }
+.ax-dot--idle { background: transparent; border: 2px solid var(--state-idle); }
+
+/* ---------- CascadeTrail ---------- */
+.ax-trail { display: flex; flex-direction: column; gap: 0; }
+.ax-trail__step { display: grid; grid-template-columns: 20px 1fr auto; gap: var(--space-3); align-items: start; padding: var(--space-2) 0; position: relative; }
+.ax-trail__step:not(:last-child)::before { content: ""; position: absolute; left: 9px; top: 26px; bottom: -6px; width: 2px; background: var(--border-subtle); }
+.ax-trail__mark { width: 20px; height: 20px; border-radius: var(--radius-pill); display: grid; place-items: center; background: var(--bg-surface); border: 2px solid var(--state-ok); color: var(--state-ok); }
+.ax-trail__mark .ax-icon { width: 12px; height: 12px; stroke-width: 3; }
+.ax-trail__step--hit .ax-trail__mark { border-color: var(--state-fault); color: var(--state-fault); }
+.ax-trail__step--warn .ax-trail__mark { border-color: var(--state-review); color: var(--state-review); }
+.ax-trail__step--skip .ax-trail__mark { border-color: var(--border-control); border-style: dashed; color: var(--text-muted); }
+.ax-trail__name { font: 600 14px/20px var(--font-sans); }
+.ax-trail__detail { font: 400 13px/18px var(--font-sans); color: var(--text-secondary); }
+.ax-trail__value { font: 500 13px/20px var(--font-sans); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+/* ---------- LimitBar ---------- */
+.ax-limit { display: grid; gap: var(--space-1); }
+.ax-limit__head { display: flex; justify-content: space-between; font: 500 13px/18px var(--font-sans); color: var(--text-secondary); }
+.ax-limit__head b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ax-limit__track { position: relative; height: 8px; border-radius: var(--radius-sm); background: var(--bg-sunken); }
+.ax-limit__band { position: absolute; top: 0; bottom: 0; background: var(--border-subtle); border-radius: var(--radius-sm); }
+.ax-limit__threshold { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text-secondary); }
+.ax-limit__value { position: absolute; top: -3px; width: 4px; height: 14px; margin-left: -2px; border-radius: 2px; background: var(--text-primary); }
+.ax-limit--review .ax-limit__value { background: var(--state-review); }
+.ax-limit--fault .ax-limit__value { background: var(--state-fault); }
+.ax-limit__scale { display: flex; justify-content: space-between; font: 400 12px/16px var(--font-sans); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ---------- IncidentBanner ---------- */
+.ax-banner { display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg); border: 1px solid; font: 400 14px/20px var(--font-sans); }
+.ax-banner__title { font-weight: 600; }
+.ax-banner__body { color: var(--text-primary); flex: 1; }
+.ax-banner__code { font: 400 12px/16px var(--font-mono); color: var(--text-secondary); }
+.ax-banner--p1 { background: var(--state-fault); color: var(--on-state); border-color: var(--state-fault); }
+.ax-banner--p1 .ax-banner__body, .ax-banner--p1 .ax-banner__code { color: var(--on-state); }
+.ax-banner--p2 { background: var(--state-review-bg); color: var(--state-review); border-color: var(--state-review); }
+.ax-banner--p3 { background: var(--bg-surface); color: var(--state-idle); border-color: var(--border-control); }
+
+/* ---------- EventRow ---------- */
+.ax-table { width: 100%; border-collapse: collapse; background: var(--bg-surface); font: 400 14px/20px var(--font-sans); }
+.ax-table th { text-align: left; font: 500 12px/16px var(--font-sans); color: var(--text-secondary); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-subtle); text-transform: uppercase; letter-spacing: .04em; }
+.ax-table td { padding: var(--space-3); border-bottom: 1px solid var(--border-subtle); vertical-align: middle; font-variant-numeric: tabular-nums; }
+.ax-table tr:hover td { background: var(--action-subtle); cursor: pointer; }
+.ax-thumb { width: 48px; height: 36px; border-radius: var(--radius-sm); background: var(--bg-media); display: block; }
+.ax-mono { font: 400 13px/18px var(--font-mono); color: var(--text-secondary); }
+
+/* ---------- Card ---------- */
+.ax-card { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); padding: var(--space-4); }
+.ax-card__title { font: 600 18px/26px var(--font-sans); margin: 0 0 var(--space-3); }

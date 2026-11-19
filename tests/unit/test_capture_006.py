@@ -538,6 +538,69 @@ class CameraProfileTests(CaptureAppCase):  # owner decision 19/11/2026 (option b
         a = self.make(source=WebcamSource(0, capture_factory=factory))
         self.assert_refused(a, "did not report a default resolution")
 
+    def test_camera_that_never_opens_is_refused_within_open_timeout(self):  # Ordem 5 item 1
+        cam = SyntheticCamera()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        cam.open_gate = gate  # the driver never returns from open
+        a = self.make(cam, config=dataclasses.replace(FAST, open_timeout_s=0.3))
+        started = time.monotonic()
+        self.assert_refused(a, "did not open within 0.3 s")
+        self.assertLess(time.monotonic() - started, 0.3 + 1.0, "the process is not blocked by the driver")
+        self.assertEqual(self.audits(a, "CAMERA_UNAVAILABLE")[0]["detail"]["code"], "AEX-CAP-001")
+
+    def test_late_open_is_released_and_never_installed(self):
+        cam = SyntheticCamera()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        cam.open_gate = gate
+        a = self.make(cam, config=dataclasses.replace(FAST, open_timeout_s=0.3))
+        with self.assertRaises(SessionError):
+            a.start_session()
+        cam.open_gate = None  # a retry opens normally while the first open is still stuck
+        a.start_session()
+        self.assertIs(a.state.state, SystemState.OBSERVING)
+        src = self.capture.source
+        assert isinstance(src, WebcamSource)
+        current = src._cap
+        gate.set()  # the stuck driver call finally returns
+        self.assertTrue(wait_until(lambda: len(cam.caps) == 2 and not cam.caps[-1].isOpened(), 2.0),
+                        "late capture object released by its own thread")
+        self.assertIs(src._cap, current, "the late open never replaced the session's camera")
+        self.assertIsNotNone(a.next_frame(2.0))
+
+    def test_close_during_a_bounded_open_never_installs_the_handle(self):  # review BENCH-VIEW B2
+        cam = SyntheticCamera()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        cam.open_gate = gate
+        src = WebcamSource(0, capture_factory=cam.factory)
+        errors: list[BaseException] = []
+
+        def opener():
+            try:
+                src.open_bounded(3.0)
+            except BaseException as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=opener)
+        t.start()
+        time.sleep(0.1)
+        src.close()  # the station is being shut down while the driver is still opening
+        gate.set()
+        t.join(5)
+        self.assertFalse(src.is_open, "a handle opened across a close() is never installed")
+        self.assertEqual([type(e).__name__ for e in errors], ["SourceOpenError"])
+        self.assertTrue(wait_until(lambda: all(not c.isOpened() for c in cam.caps), 2.0), "and it is released")
+
+    def test_open_timeout_config_bounds(self):
+        p = self.tmp / "t.toml"
+        for bad in ("0", "61", '"5"'):
+            with self.subTest(value=bad):
+                p.write_text(f"[capture]\nopen_timeout_s = {bad}\n", encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    load_config(p)
+
     def test_live_source_without_profile_support_is_refused(self):
         class LiveFolder(ImageFolderSource):
             live = True

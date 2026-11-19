@@ -48,7 +48,10 @@ from acurix_edge.capture.manifest import (
     validate_manifest,
 )
 from acurix_edge.capture.profile import CameraProfile, check_camera
-from acurix_edge.capture.sources import FrameSource, SourceError
+from acurix_edge.capture.sources import FrameSource, SourceError, open_with_timeout
+from acurix_edge.config.settings import CaptureConfig
+
+DEFAULT_OPEN_TIMEOUT_S = CaptureConfig().open_timeout_s
 
 log = logging.getLogger("acurix_edge.capture.bench")
 
@@ -161,7 +164,8 @@ def capture_session(source: FrameSource, output_root: Path, params: BenchParams,
                     interval_s: float = 0.0, session_id: str | None = None,
                     now: Callable[[], datetime] = lambda: datetime.now(UTC),
                     device_label: str | None = None,
-                    expected_profile: CameraProfile | None = None) -> BenchResult:
+                    expected_profile: CameraProfile | None = None,
+                    open_timeout_s: float = DEFAULT_OPEN_TIMEOUT_S) -> BenchResult:
     """A camera source (webcam) must match `expected_profile` (fail-closed when None) BEFORE the
     session folder is created; folder/video sources are not profiled."""
     problems = params.problems()
@@ -177,7 +181,7 @@ def capture_session(source: FrameSource, output_root: Path, params: BenchParams,
     root = check_output_root(output_root)
     started = now()
     try:
-        source.open()
+        open_with_timeout(source, open_timeout_s)
     except SourceError as exc:
         raise BenchError([f"source unavailable (AEX-CAP-001): {exc}"]) from exc
     try:

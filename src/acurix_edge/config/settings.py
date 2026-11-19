@@ -78,6 +78,8 @@ class CaptureConfig:
     - drop_alarm_threshold: frames dropped in one session above this -> AEX-CAP-002 (log, audit,
       health `queue` DEGRADED). 0 means any drop raises the alarm.
     - frame_timeout_s: a read blocked longer than this is a camera loss (FAULT).
+    - open_timeout_s: time allowed for the camera driver to open; beyond it AEX-CAP-001 (a late
+      open is released, never used).
     - verify_timeout_s: time allowed to get the first valid frame after opening the source.
     - profile_timeout_s: time allowed to measure the camera profile (~0.65 s per requested size
       on DirectShow, 5 sizes).
@@ -90,6 +92,7 @@ class CaptureConfig:
     queue_max_frames: int = 4
     drop_alarm_threshold: int = 0
     frame_timeout_s: float = 1.0
+    open_timeout_s: float = 5.0
     verify_timeout_s: float = 5.0
     profile_timeout_s: float = 10.0
     camera_backend: str = ""
@@ -340,6 +343,8 @@ def _capture_problems(c: CaptureConfig) -> list[str]:
         p.append(f"capture.frame_timeout_s must be a number in 0.05..{CAPTURE_FRAME_TIMEOUT_MAX_S:g} (HLT-004)")
     if not _is_num(c.verify_timeout_s) or not 0.1 <= c.verify_timeout_s <= 30:
         p.append("capture.verify_timeout_s must be a number in 0.1..30")
+    if not _is_num(c.open_timeout_s) or not 0.1 <= c.open_timeout_s <= 60:
+        p.append("capture.open_timeout_s must be a number in 0.1..60")
     if not _is_num(c.profile_timeout_s) or not 0.1 <= c.profile_timeout_s <= 60:
         p.append("capture.profile_timeout_s must be a number in 0.1..60")
     from acurix_edge.capture.profile import profile_problems  # capture imports config: import late

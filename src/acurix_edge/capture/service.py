@@ -31,7 +31,14 @@ from acurix_edge.capture.buffer import SESSION_ENDED, BufferClosed, BufferCounte
 from acurix_edge.capture.errors import CaptureError, CaptureLost, CaptureUnavailable, EndOfStream, StaleSession
 from acurix_edge.capture.frames import FrameStamper, InvalidImageError, check_image
 from acurix_edge.capture.profile import CameraProfile, check_camera, expected_profile
-from acurix_edge.capture.sources import FrameSource, Image, SourceError, SourceLostError, SourceOpenError
+from acurix_edge.capture.sources import (
+    FrameSource,
+    Image,
+    SourceError,
+    SourceLostError,
+    SourceOpenError,
+    open_with_timeout,
+)
 from acurix_edge.config.settings import CaptureConfig
 from acurix_edge.contracts.capture import CapturedFrame
 from acurix_edge.contracts.errors import ErrorCode
@@ -150,7 +157,7 @@ class CaptureService:
         # Always a FRESH open: finite sources are rewound (verification never consumes a frame) and a
         # live camera never reuses a handle left over from a previous session (review 2, B-1).
         self._close_source()
-        self.source.open()
+        open_with_timeout(self.source, self.config.open_timeout_s)
         profile: CameraProfile | None = self._call_with_timeout(
             lambda: check_camera(self.source, self.expected_profile), self.config.profile_timeout_s,
             "camera profile")

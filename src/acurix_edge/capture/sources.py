@@ -140,6 +140,8 @@ class _VideoCaptureSource:
         self._cap: Any = None
         self._ended = False
         self._io_lock = threading.Lock()
+        self._open_lock = threading.Lock()  # serializes open/open_bounded (never two handles installed)
+        self._close_gen = 0                 # bumped by close(): an open that raced a close is discarded
         self._reading: dict[int, int] = {}   # id(cap) -> reads in flight
         self._deferred: dict[int, Any] = {}  # id(cap) -> cap to release after its read returns
 
@@ -147,20 +149,20 @@ class _VideoCaptureSource:
     def is_open(self) -> bool:
         return self._cap is not None
 
-    def _configure(self, cap: Any) -> None:
-        """Hook for source-specific settings after a successful open."""
+    def _configure(self, cap: Any) -> dict[str, Any]:
+        """Hook for source-specific settings after a successful open. Returns facts measured on
+        THIS capture object; they are applied to the source only when it is installed (`_install`)."""
+        return {}
 
-    def open(self) -> None:
-        if self._cap is not None:
-            return
+    def _create(self) -> tuple[Any, dict[str, Any]]:
+        """Open and configure a NEW capture object without touching the source's state."""
         try:
             cap = self._factory(self._target)
         except Exception as exc:  # backend raised instead of reporting "not opened"
             raise SourceOpenError(f"{self.source_id}: open failed ({type(exc).__name__})") from exc
         try:
             opened = cap is not None and bool(cap.isOpened())
-            if opened:
-                self._configure(cap)
+            meta = self._configure(cap) if opened else {}
         except Exception as exc:
             _release(cap)
             raise SourceOpenError(f"{self.source_id}: open failed ({type(exc).__name__})") from exc
@@ -168,7 +170,71 @@ class _VideoCaptureSource:
             if cap is not None:
                 _release(cap)
             raise SourceOpenError(f"{self.source_id}: could not be opened")
+        return cap, meta
+
+    def _install(self, cap: Any, meta: dict[str, Any]) -> None:
         self._cap, self._ended = cap, False
+
+    def _install_unless_closed(self, created: tuple[Any, dict[str, Any]], close_gen: int) -> None:
+        with self._io_lock:
+            if self._close_gen != close_gen or self._cap is not None:
+                discard = created[0]  # close() ran during the open (or a handle exists): never install
+            else:
+                discard = None
+                self._install(*created)
+        if discard is not None:
+            _release(discard)
+            raise SourceOpenError(f"{self.source_id}: source closed while opening")
+
+    def open(self) -> None:
+        with self._open_lock:
+            if self._cap is not None:
+                return
+            close_gen = self._close_gen
+            self._install_unless_closed(self._create(), close_gen)
+
+    def open_bounded(self, timeout_s: float) -> None:
+        """open() that gives up after `timeout_s` (a camera driver can block in open). An open that
+        completes AFTER the timeout (or after an interruption such as Ctrl+C) is never installed:
+        that late capture object is released by the opening thread itself, so it can never replace
+        or touch a later session's camera."""
+        with self._open_lock:
+            if self._cap is not None:
+                return
+            self._open_bounded(timeout_s, self._close_gen)
+
+    def _open_bounded(self, timeout_s: float, close_gen: int) -> None:
+        box: dict[str, Any] = {}
+        guard = threading.Lock()
+
+        def run() -> None:
+            try:
+                created = self._create()
+            except BaseException as exc:  # re-raised in the caller thread (if it still waits)
+                with guard:
+                    box["error"] = exc
+                return
+            with guard:
+                late = box.get("abandoned", False)
+                if not late:
+                    box["created"] = created
+            if late:
+                _release(created[0])
+
+        t = threading.Thread(target=run, name="acurix-capture-open", daemon=True)
+        t.start()
+        try:
+            t.join(timeout_s)
+        finally:  # also on KeyboardInterrupt: a late open must release itself (review BENCH-VIEW B1)
+            with guard:
+                pending = "created" not in box and "error" not in box
+                if pending:
+                    box["abandoned"] = True
+        if pending:
+            raise SourceOpenError(f"{self.source_id}: camera did not open within {timeout_s:g} s")
+        if "error" in box:
+            raise box["error"]
+        self._install_unless_closed(box["created"], close_gen)
 
     def _pin(self, what: str) -> Any:
         """Mark a native operation in flight on the CURRENT capture object and return it. Until
@@ -210,6 +276,7 @@ class _VideoCaptureSource:
 
     def close(self) -> None:
         with self._io_lock:
+            self._close_gen += 1  # an open in progress will not install its handle
             cap, self._cap = self._cap, None
             if cap is not None and id(cap) in self._reading:
                 self._deferred[id(cap)] = cap  # released by the reader when its read returns
@@ -245,6 +312,16 @@ class VideoFileSource(_VideoCaptureSource):
         return cast(Image, image)
 
 
+def open_with_timeout(source: FrameSource, timeout_s: float) -> None:
+    """Open `source` or raise SourceOpenError (AEX-CAP-001) after `timeout_s`, never hanging the
+    process. cv2.VideoCapture sources (webcam, video) are bounded; a folder only touches the file
+    system and is opened directly."""
+    if isinstance(source, _VideoCaptureSource):
+        source.open_bounded(timeout_s)
+    else:
+        source.open()
+
+
 def _default_webcam_factory(index: int) -> Any:
     # DirectShow opens quickly on Windows; elsewhere let OpenCV choose.
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
@@ -275,14 +352,20 @@ class WebcamSource(_VideoCaptureSource):
         self._backend = "UNKNOWN"
         self._default_size = (0, 0)
 
-    def _configure(self, cap: Any) -> None:
+    def _configure(self, cap: Any) -> dict[str, Any]:
         # Recorded BEFORE any size is requested: the camera's own default is part of its profile.
         try:
-            self._backend = str(cap.getBackendName()) or "UNKNOWN"
+            backend = str(cap.getBackendName()) or "UNKNOWN"
         except Exception:  # a backend that cannot name itself does not match any expected profile
-            self._backend = "UNKNOWN"
-        self._default_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            backend = "UNKNOWN"
+        default_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         self._apply_size(cap, *self._size)
+        return {"backend": backend, "default_size": default_size}
+
+    def _install(self, cap: Any, meta: dict[str, Any]) -> None:
+        self._backend = str(meta.get("backend", "UNKNOWN"))
+        self._default_size = meta.get("default_size", (0, 0))
+        super()._install(cap, meta)
 
     @staticmethod
     def _apply_size(cap: Any, width: int | None, height: int | None) -> None:

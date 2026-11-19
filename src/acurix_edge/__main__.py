@@ -24,6 +24,11 @@ Exit codes (capture): 0 requested frames written (or finite source ended), 1 sto
 parameters, existing session, source unavailable, camera profile mismatch).
 Exit codes (capture-verify): 0 manifest valid and every sha256 matches, 2 otherwise.
 Exit codes (camera-profile): 0 profile measured, 2 camera unavailable or invalid parameters.
+
+Bench viewer (AEX-BENCH-VIEW-001, DEVELOPMENT TOOL, not the 0.5.0 console):
+  python -m acurix_edge bench-view --config FILE [--device N] [--port P] [--fps F] [--stream-width W]
+Listens ONLY on 127.0.0.1; never writes images; never shows PASS/DEFECT. Stop: page button or Ctrl+C.
+Exit codes (bench-view): 0 stopped cleanly, 2 refused (configuration, camera profile missing, port busy).
 """
 
 from __future__ import annotations
@@ -59,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         return _capture_verify(args)
     if args.command == "camera-profile":
         return _camera_profile(args)
+    if args.command == "bench-view":
+        return _bench_view(args)
 
     try:
         cfg = load_config(args.config)
@@ -127,16 +134,25 @@ def _add_capture_parsers(sub: Any) -> None:
     p = sub.add_parser("camera-profile", help="measure the camera profile to store as the expected one")
     p.add_argument("--device", type=int, required=True, help="webcam index")
     p.add_argument("--device-label", required=True, help="real camera name, stored in the profile")
+    b = sub.add_parser("bench-view", help="DEVELOPMENT TOOL: local live page (127.0.0.1) of the real engine")
+    b.add_argument("--config", type=Path, required=True, help="configuration with the expected camera profile")
+    b.add_argument("--device", type=int, default=0, help="webcam index")
+    b.add_argument("--port", type=int, default=None, help="local port (default: api.port of the config, 8765)")
+    b.add_argument("--fps", type=float, default=8.0, help="processed/displayed frames per second (1..15)")
+    b.add_argument("--stream-width", type=int, default=640, help="width of the live image (160..1280 px)")
+    b.add_argument("--base-dir", type=Path, default=Path.cwd())
 
 
 def _capture(args: argparse.Namespace) -> int:
     from acurix_edge.capture.bench import BenchError, BenchParams, capture_session
     from acurix_edge.capture.profile import CameraProfile, expected_profile
     from acurix_edge.capture.sources import FrameSource, ImageFolderSource, VideoFileSource, WebcamSource
+    from acurix_edge.config.settings import CaptureConfig
 
     source: FrameSource
     expected: CameraProfile | None = None
     device_label: str | None = args.device_label
+    open_timeout_s = CaptureConfig().open_timeout_s
     if args.source == "webcam":
         if args.device is None or args.path is not None:
             print(json.dumps({"error": "CAPTURE_REFUSED", "problems": ["webcam requires --device and no --path"]}),
@@ -148,7 +164,8 @@ def _capture(args: argparse.Namespace) -> int:
                 "measure it with `python -m acurix_edge camera-profile`"]}, ensure_ascii=False), file=sys.stderr)
             return 2
         try:
-            expected = expected_profile(load_config(args.config).capture)
+            capture_cfg = load_config(args.config).capture
+            expected, open_timeout_s = expected_profile(capture_cfg), capture_cfg.open_timeout_s
         except ConfigError as exc:
             print(json.dumps({"error": "CONFIG_INVALID", "problems": exc.problems}, ensure_ascii=False),
                   file=sys.stderr)
@@ -170,7 +187,8 @@ def _capture(args: argparse.Namespace) -> int:
     try:
         result = capture_session(source, args.base_dir.resolve() / "datasets" / "local", params,
                                  frames=args.frames, interval_s=args.interval_s, session_id=args.session_id,
-                                 device_label=device_label, expected_profile=expected)
+                                 device_label=device_label, expected_profile=expected,
+                                 open_timeout_s=open_timeout_s)
     except BenchError as exc:
         print(json.dumps({"error": "CAPTURE_REFUSED", "problems": exc.problems}, ensure_ascii=False),
               file=sys.stderr)
@@ -197,7 +215,8 @@ def _capture_verify(args: argparse.Namespace) -> int:
 def _camera_profile(args: argparse.Namespace) -> int:
     """Open the camera, measure its profile, close it. Frames are only measured (never written)."""
     from acurix_edge.capture.profile import label_ok
-    from acurix_edge.capture.sources import SourceError, WebcamSource
+    from acurix_edge.capture.sources import SourceError, WebcamSource, open_with_timeout
+    from acurix_edge.config.settings import CaptureConfig
 
     problems = []
     if args.device < 0:
@@ -209,7 +228,7 @@ def _camera_profile(args: argparse.Namespace) -> int:
         return 2
     source = WebcamSource(args.device, device_label=args.device_label)
     try:
-        source.open()
+        open_with_timeout(source, CaptureConfig().open_timeout_s)
         profile = source.measure_profile()
     except Exception as exc:  # SourceError or a backend error: always a structured AEX-CAP-001 (B4)
         detail = str(exc) if isinstance(exc, SourceError) else f"profile failed ({type(exc).__name__})"
@@ -220,6 +239,32 @@ def _camera_profile(args: argparse.Namespace) -> int:
         source.close()
     print(json.dumps({"profile": profile.to_dict(), "config_toml": profile.to_toml()}, indent=2,
                      ensure_ascii=False))
+    return 0
+
+
+def _bench_view(args: argparse.Namespace) -> int:
+    """Bench viewer (AEX-BENCH-VIEW-001). Turns the real camera on: only with the owner's authorization."""
+    from acurix_edge.benchview.app_factory import BenchViewError, build_bench_view
+
+    configure_logging("WARNING")
+    try:
+        server = build_bench_view(config_path=args.config, base_dir=args.base_dir.resolve(), device=args.device,
+                                  port=args.port, fps=args.fps, stream_width=args.stream_width)
+    except BenchViewError as exc:
+        print(json.dumps({"error": "BENCH_VIEW_REFUSED", "problems": exc.problems}, ensure_ascii=False),
+              file=sys.stderr)
+        return 2
+    try:  # start() opens the camera: Ctrl+C during it must still release everything (review B1)
+        started = server.engine.start()
+        print(json.dumps({"url": server.url, "session_started": started, "problem": server.engine.problem,
+                          "stop": "botão Encerrar na página ou Ctrl+C"}, ensure_ascii=False), flush=True)
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.engine.stop()  # ends the session and releases the camera (idempotent)
+        server.server_close()
+    print(json.dumps({"stopped": True, "frames_processed": server.engine.frames_processed}), flush=True)
     return 0
 
 

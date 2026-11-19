@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Acurix Edge — visualizador de bancada</title>
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/bundle.css">
+  <link rel="stylesheet" href="/static/viewer.css">
+  <script src="/static/viewer.js" defer></script>
+</head>
+<body class="ax">
+  <header class="ax-strip" aria-label="Status do sistema">
+    <span class="ax-strip__item"><span id="cam-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Câmera <b id="cam">—</b></span>
+    <span class="ax-strip__item"><span id="sys-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Sistema <b id="sys">—</b></span>
+    <span class="ax-strip__item">Latência p95 <b id="lat">—</b></span>
+    <span class="ax-strip__item">Quadros/s <b id="fps">—</b></span>
+    <span class="ax-strip__item">RAM livre <b id="ram">—</b></span>
+    <span class="ax-strip__item">Envelope <b id="env">—</b></span>
+    <span class="ax-strip__spacer"></span>
+    <button id="stop" class="ax-btn ax-btn--secondary" type="button">Encerrar</button>
+  </header>
+
+  <div id="banner" class="ax-banner ax-banner--p1 bv-banner bv-hidden" role="alert">
+    <div class="ax-banner__body">
+      <div id="banner-title" class="ax-banner__title"></div>
+      <div id="banner-text"></div>
+    </div>
+    <span id="banner-code" class="ax-banner__code"></span>
+  </div>
+
+  <main class="bv-main">
+    <section class="bv-left" aria-label="Imagem ao vivo">
+      <div id="media" class="bv-media">
+        <img id="live" class="bv-live" src="/stream.mjpg" alt="Imagem ao vivo da bancada">
+        <div id="roi" class="bv-roi" aria-hidden="true"></div>
+      </div>
+      <div id="refusal" class="bv-refusal bv-hidden" role="status"></div>
+      <p id="image-note" class="bv-note"></p>
+    </section>
+
+    <aside class="bv-side">
+      <section class="ax-card">
+        <h2 class="ax-card__title">Veredito do sistema</h2>
+        <span id="verdict" class="ax-verdict ax-verdict--none ax-verdict--hero">NO_DECISION</span>
+        <p id="verdict-phrase" class="bv-note">O sistema ainda não decide: especialista em validação</p>
+        <p id="verdict-reason" class="bv-note"></p>
+      </section>
+
+      <section class="ax-card">
+        <h2 class="ax-card__title">Porta de qualidade · <span id="q-status" class="ax-num">—</span></h2>
+        <div id="q-bars" class="bv-stack"></div>
+      </section>
+
+      <section class="ax-card">
+        <h2 class="ax-card__title">Prévia (modo sombra) — não decide</h2>
+        <div id="s-bar" class="bv-stack"></div>
+        <p id="s-text" class="bv-note"></p>
+      </section>
+
+      <section class="ax-card">
+        <h2 class="ax-card__title">Trilha da decisão</h2>
+        <div id="trail" class="ax-trail"></div>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="bv-footer">
+    <p class="bv-privacy">Câmera apontada só para a bancada. Nenhuma imagem é gravada.</p>
+    <p>Ferramenta de desenvolvimento (AEX-BENCH-VIEW-001) — não é o console da release 0.5.0. Modo observação: nenhuma máquina é comandada.</p>
+    <p>© 2026 Luís Eduardo de Sousa Barbosa. Fonte Inter: SIL Open Font License 1.1.</p>
+  </footer>
+</body>
+</html>

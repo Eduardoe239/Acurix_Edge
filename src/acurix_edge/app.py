@@ -19,6 +19,7 @@ Guarantees enforced here:
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -105,6 +106,9 @@ class ProcessOutcome:
     result: str
     reason: str
     code: ErrorCode | None = None  # AEX code whenever the outcome was forced to NO_DECISION by a failure
+    # Copy of what the event records besides the decision (`quality`, `stages`): for local display
+    # (bench viewer). Read-only information; it never feeds a decision. None for legacy/idempotent paths.
+    detail: dict[str, Any] | None = None
 
 
 class Application:
@@ -854,8 +858,10 @@ class Application:
                 if not record.persisted:
                     # An untraceable result must never be presented as conclusive.
                     return ProcessOutcome(record=record, result=InspectionResult.NO_DECISION.value,
-                                          reason="EVENT_NOT_PERSISTED", code=record.code or ErrorCode.DB_001)
-                return ProcessOutcome(record=record, result=decision.result.value, reason=decision.reason.value)
+                                          reason="EVENT_NOT_PERSISTED", code=record.code or ErrorCode.DB_001,
+                                          detail=copy.deepcopy(extra))
+                return ProcessOutcome(record=record, result=decision.result.value, reason=decision.reason.value,
+                                      detail=copy.deepcopy(extra))
 
     # -- status --------------------------------------------------------------
     def status(self) -> dict[str, Any]:

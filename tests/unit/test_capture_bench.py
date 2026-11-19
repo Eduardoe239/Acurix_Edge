@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import threading
 import unittest
 from datetime import UTC, datetime
 from unittest import mock
@@ -169,6 +170,17 @@ class BenchCaptureTests(BenchCase):
 
         with self.assertRaises(BenchError) as ctx:
             self.run_capture(source=WebcamSource(0, capture_factory=factory), expected_profile=cam.profile())
+        self.assertIn("AEX-CAP-001", str(ctx.exception))
+        self.assertEqual(self.session_dirs(), [])
+
+    def test_camera_that_never_opens_is_refused_and_creates_nothing(self):  # Ordem 5 item 1
+        cam = SyntheticCamera()
+        gate = cam.open_gate = threading.Event()
+        self.addCleanup(gate.set)
+        with self.assertRaises(BenchError) as ctx:
+            self.run_capture(source=WebcamSource(0, capture_factory=cam.factory), expected_profile=cam.profile(),
+                             open_timeout_s=0.2)
+        self.assertIn("did not open within", str(ctx.exception))
         self.assertIn("AEX-CAP-001", str(ctx.exception))
         self.assertEqual(self.session_dirs(), [])
 

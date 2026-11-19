@@ -34,3 +34,17 @@ Inclusão somente após triagem de licença e aprovação do proprietário (ADR-
      do OpenBLAS. A GCC Runtime Library Exception permite a distribuição.
    - Runtime Microsoft Visual C++ (msvcp140*.dll, termos de redistribuição da Microsoft).
    O texto integral das licenças acompanha o pacote instalado (numpy-2.2.6.dist-info/LICENSE.txt).
+
+------------------------------------------------------------------------------
+3. Inter (fonte tipográfica variável, subconjunto latino)
+   Licença: OFL-1.1 (SIL Open Font License, versão 1.1)
+   Origem: https://github.com/rsms/inter  |  https://rsms.me/inter/
+   Arquivo: src/acurix_edge/benchview/static/Inter-Variable-latin.woff2
+   sha256: f052ee44c3728dfd23aba8a4567150bc314d23903026fbb6ad089422c2df56af
+   Copyright: The Inter Project Authors (aviso exato a confirmar no pacote oficial).
+   Aprovada com o design system pelo proprietário em 10/11/2026; registrada na Ordem 5 (19/11/2026).
+   Uso: tipografia da página local do visualizador de bancada e do console, servida localmente.
+   A OFL permite usar, embutir e redistribuir a fonte junto com software; proíbe vendê-la
+   isoladamente e exige que o aviso de copyright e o texto da licença a acompanhem.
+   PENDENTE antes de distribuir a terceiros: confirmar a versão e incluir o texto integral
+   da OFL 1.1 (OFL.txt do pacote oficial) ao lado do arquivo da fonte.

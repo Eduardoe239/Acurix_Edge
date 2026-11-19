@@ -66,6 +66,7 @@ class SyntheticCamera:
         self._stall = threading.Event()   # set -> read blocks
         self._unstall = threading.Event()
         self.set_gate: threading.Event | None = None  # not None and not set -> cap.set blocks (driver stuck)
+        self.open_gate: threading.Event | None = None  # not None and not set -> opening blocks (driver stuck)
         self.caps: list[_Cap] = []  # every capture object created, in order
         self.lock = threading.Lock()
 
@@ -88,6 +89,9 @@ class SyntheticCamera:
         self._unstall.set()
 
     def factory(self, _target: object, *_args: object) -> _Cap:
+        gate = self.open_gate
+        if gate is not None:
+            gate.wait(10.0)
         cap = _Cap(self)
         with self.lock:
             self.opens += 1

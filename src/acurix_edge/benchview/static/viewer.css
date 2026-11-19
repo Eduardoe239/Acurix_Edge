@@ -1,0 +1,70 @@
+/* Acurix Edge — visualizador de bancada (AEX-BENCH-VIEW-001).
+   Somente variáveis de tokens.css e classes de bundle.css: nenhuma cor, tamanho ou espaçamento literal.
+   (c) 2026 Luís Eduardo de Sousa Barbosa. Fonte Inter: SIL OFL 1.1. */
+
+@font-face {
+  font-family: "Inter";
+  src: url("Inter-Variable-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+body { margin: 0; background: var(--bg-canvas); }
+
+.bv-hidden { display: none !important; }
+
+.bv-banner { margin: var(--space-4) var(--space-4) 0; }
+
+.bv-main {
+  display: grid;
+  grid-template-columns: 3fr 2fr; /* imagem ~60 % | painel ~40 % */
+  gap: var(--space-4);
+  padding: var(--space-4);
+  align-items: start;
+}
+
+.bv-left { display: grid; gap: 0; }
+
+.bv-media {
+  position: relative;
+  background: var(--bg-media);
+  border: var(--space-1) solid var(--bg-media);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.bv-media--refused { border-color: var(--state-review); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+
+.bv-live { display: block; width: 100%; height: auto; }
+
+.bv-roi {
+  position: absolute;
+  border: calc(var(--space-1) / 2) dashed var(--text-on-media);
+  pointer-events: none;
+}
+.bv-media--refused .bv-roi { border-color: var(--state-review); }
+
+.bv-refusal {
+  background: var(--state-review-bg);
+  color: var(--state-review);
+  border: var(--space-1) solid var(--state-review);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  padding: var(--space-2) var(--space-3);
+  font-weight: 600;
+}
+
+.bv-side { display: grid; gap: var(--space-4); align-content: start; }
+.bv-stack { display: grid; gap: var(--space-3); }
+
+.bv-note { margin: var(--space-3) 0 0; color: var(--text-secondary); }
+.bv-limit-detail { color: var(--text-muted); }
+
+.bv-footer { padding: 0 var(--space-4) var(--space-4); color: var(--text-secondary); }
+.bv-footer p { margin: var(--space-1) 0; }
+.bv-privacy { color: var(--text-primary); font-weight: 600; }
+
+.bv-trail-skip-name { color: var(--text-secondary); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
