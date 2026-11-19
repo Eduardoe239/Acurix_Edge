@@ -61,9 +61,46 @@ body { margin: 0; background: var(--bg-canvas); }
 
 .bv-footer { padding: 0 var(--space-4) var(--space-4); color: var(--text-secondary); }
 .bv-footer p { margin: var(--space-1) 0; }
-.bv-privacy { color: var(--text-primary); font-weight: 600; }
+
+/* Aviso de privacidade fixo logo abaixo da imagem (inserido pelo servidor conforme o modo). */
+.bv-privacy {  /* sobre .ax-card (fundo, borda e raio do design system) */
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Identificação no início da faixa de status; a legenda usa a tipografia de .ax-limit__scale. */
+.bv-ident { gap: var(--space-2); }
+.bv-caption { display: inline; }
+
+/* Texto da prévia com a mesma cor do marcador (mesma categoria). */
+.bv-tone-review { color: var(--state-review); font-weight: 600; }
+.bv-tone-neutral { color: var(--text-primary); font-weight: 600; }
 
 .bv-trail-skip-name { color: var(--text-secondary); }
+
+/* Demo sintético: faixa fixa no topo (sticky, acima de tudo) e etiqueta sobre a imagem.
+   Inseridas pelo servidor no HTML; o JS nunca as altera nem esconde. */
+.bv-simulated {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  border-radius: 0;
+  justify-content: center;
+  font-weight: 700;
+}
+.bv-sim-tag {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--state-review-bg);
+  color: var(--state-review);
+  font-weight: 700;
+  pointer-events: none;
+}
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

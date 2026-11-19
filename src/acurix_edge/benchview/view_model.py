@@ -16,12 +16,17 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from acurix_edge.config.settings import QualityConfig
+from acurix_edge.health.checks import ADR014_MIN_FREE_RAM_MB
 
 SHADOW_TITLE = "Prévia (modo sombra) — não decide"
 VERDICT_PHRASE = "O sistema ainda não decide: especialista em validação"
 PRIVACY_NOTICE = "Câmera apontada só para a bancada. Nenhuma imagem é gravada."
+PRIVACY_NOTICE_SIMULATED = "Fonte simulada: nenhuma câmera em uso. Nenhuma imagem é gravada."
+TOOL_NAME = "Acurix Edge · Visualizador de bancada"
+TOOL_CAPTION = "ferramenta de desenvolvimento"
 TOOL_NOTICE = "Ferramenta de desenvolvimento (AEX-BENCH-VIEW-001) — não é o console da release 0.5.0."
 OWNER = "Luís Eduardo de Sousa Barbosa"
+SIMULATED_NOTICE = "FONTE SIMULADA — imagem gerada por código, não é câmera real"
 NO_DECISION = "NO_DECISION"
 REVIEW = "REVIEW"
 HIDDEN_VERDICT = "NÃO EXIBIDO"
@@ -29,6 +34,9 @@ DISPLAYABLE_VERDICTS = frozenset({NO_DECISION, REVIEW})  # PASS/DEFECT are never
 RESET_HELP = ("Reconecte o cabo USB, encerre o visualizador e execute "
               "python -m acurix_edge reset-fault --reason \"<motivo>\" (mesma pasta). "
               "Depois inicie o visualizador de novo.")
+
+RESET_HELP_SIMULATED = ("Fonte simulada: não há cabo nem câmera. Encerre o visualizador e inicie o demo "
+                        "de novo (a pasta temporária é nova a cada execução).")
 
 QUALITY_REASON_PT = {
     "FOCUS_LOW": "Imagem sem foco",
@@ -52,17 +60,50 @@ SHADOW_INCONCLUSIVE_PT = {
     "LABEL_NOT_FOUND": "etiqueta não encontrada",
     "LABEL_SHAPE_AMBIGUOUS": "formato da etiqueta ambíguo",
 }
-DECISION_REASON_PT = {
-    "INPUT_QUALITY": "imagem recusada pela porta de qualidade",
-    "INFERENCE_NOT_OK": "nenhum modelo aprovado para decidir",
-    "NO_APPROVED_RULE": "nenhuma regra de decisão aprovada",
-    "HEALTH_NOT_OK": "saúde do sistema fora do normal",
-    "SYSTEM_NOT_OBSERVING": "sistema fora de observação",
-    "RULE_ERROR": "erro na regra de decisão",
-    "EVENT_NOT_PERSISTED": "evento não registrado",
-    "EVENT_RECORD_CORRUPT": "registro de evento corrompido",
-    "IDEMPOTENCY_CONFLICT": "conflito de identificação da inspeção",
+DECISION_REASON_PT = {  # reasons that do not depend on the system state
+    "INFERENCE_NOT_OK": "Especialista em validação: nenhum modelo aprovado para decidir",
+    "NO_APPROVED_RULE": "Nenhuma regra de decisão aprovada",
+    "RULE_ERROR": "Erro na regra de decisão",
+    "EVENT_NOT_PERSISTED": "Evento não registrado no banco",
+    "EVENT_RECORD_CORRUPT": "Registro de evento corrompido",
+    "IDEMPOTENCY_CONFLICT": "Inspeção repetida com conteúdo diferente",
 }
+# Quality gate rule (vision/quality_gate.py): any px of the piece outside the template ROI fails.
+OUTSIDE_LIMIT_PX = 0.0
+POSITION_SCALE_PX = 100.0  # bar scale for the displacement (values above are clamped: "100+ px")
+STATE_REASONS = frozenset({"SYSTEM_NOT_OBSERVING", "HEALTH_NOT_OK"})  # explained by the REAL health entries
+HealthIssue = tuple[str, str] | tuple[str, str, str]  # (entry name, status[, AEX code])
+# Shop-floor phrase chosen by (entry, status, AEX code) — never by the name alone (review 003, M1):
+# a phrase states a cause only when that exact status/code says so. Anything else is described
+# neutrally from the real data ("<entrada>: <status>" / "<grandeza> não medida").
+HEALTH_ENTRY_PT = {
+    "memory": "RAM livre", "models": "modelos", "decision_rule": "regra de decisão", "camera": "câmera",
+    "database": "banco de dados", "storage": "disco", "clock": "relógio do computador", "cpu": "processador",
+    "gpu": "placa de vídeo", "queue": "fila de captura", "quality_envelope": "porta de qualidade",
+}
+HEALTH_CAUSE_PT: dict[tuple[str, str, str], str] = {
+    ("memory", "DEGRADED", "AEX-CAS-004"):
+        f"RAM livre abaixo de {ADR014_MIN_FREE_RAM_MB / 1024:.1f} GB".replace(".", ","),
+    ("models", "DEGRADED", ""): "nenhum modelo aprovado",
+    ("models", "DEGRADED", "AEX-CFG-002"): "modelo carregado fora da lista aprovada",
+    ("decision_rule", "DEGRADED", ""): "nenhuma regra de decisão aprovada",
+    ("queue", "DEGRADED", "AEX-CAP-002"): "fila de captura descartando quadros",
+    ("quality_envelope", "DEGRADED", "AEX-CFG-001"): "envelope de qualidade recusado",
+    ("quality_envelope", "DEGRADED", "AEX-SYS-001"): "porta de qualidade com erros seguidos",
+    ("storage", "DEGRADED", "AEX-DB-002"): "pouco espaço em disco",
+}
+
+
+def health_phrase(issue: HealthIssue) -> str:
+    name, status = issue[0], issue[1]
+    code = issue[2] if len(issue) > 2 else ""
+    known = HEALTH_CAUSE_PT.get((name, status, code))
+    if known:
+        return known
+    label = HEALTH_ENTRY_PT.get(name, name)
+    if status == "UNKNOWN":
+        return f"{label}: não medido"
+    return f"{label}: {status}"
 
 
 def fmt(value: float, decimals: int = 1) -> str:
@@ -70,6 +111,18 @@ def fmt(value: float, decimals: int = 1) -> str:
     if not math.isfinite(value):
         return "—"
     return f"{value:.{decimals}f}".replace(".", ",")
+
+
+def fmt_limit(value: float) -> str:
+    """A configured limit: no decimals when whole, one otherwise (0,5° is never shown as 0°)."""
+    return fmt(value, 0 if math.isfinite(value) and value == round(value) else 1)
+
+
+def _num(value: Any, default: float) -> float:
+    """A numeric attribute; missing/None/non-numeric -> default (never an exception in /api/status)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
 
 
 def _pct(value: float, lo: float, hi: float) -> float:
@@ -83,24 +136,54 @@ def limit_bar(label: str, value: float, value_text: str, *, scale: tuple[float, 
               scale_text: tuple[str, str], detail: str = "") -> dict[str, Any]:
     """Data for one `ax-limit` bar: every position already in percent of the scale."""
     lo, hi = scale
-    return {"label": label, "value_text": value_text, "value_pct": _pct(value, lo, hi),
+    measured = math.isfinite(value)  # not measured -> no marker at all (never a fake 0)
+    return {"label": label, "value_text": value_text, "value_pct": _pct(value, lo, hi) if measured else None,
             "thresholds_pct": [_pct(t, lo, hi) for t in thresholds],
             "band_pct": [_pct(band[0], lo, hi), _pct(band[1], lo, hi)] if band else None,
             "attention": attention, "scale_text": list(scale_text), "detail": detail}
 
 
 # -- verdict --------------------------------------------------------------------------------
-def verdict_view(result: str | None, reason: str | None) -> dict[str, Any]:
+def state_reason(system_state: str, health_issues: Sequence[HealthIssue]) -> str:
+    """Why the system is not deciding, from the REAL state and the REAL health entries that are
+    not OK (nothing invented: see `health_phrase`)."""
+    if system_state == "IDLE":
+        return "Sessão de inspeção não iniciada"
+    if system_state == "FAULT":
+        return "Sistema em FAULT: inspeção parada"
+    causes = [health_phrase(i) for i in health_issues]
+    if system_state == "OBSERVING" and not causes:  # recovered since the last frame (review 003, B3)
+        return "Aguardando o próximo quadro"
+    return f"Sistema em {system_state}: " + "; ".join(causes) if causes else f"Sistema em {system_state}"
+
+
+def reason_text(reason: str | None, system_state: str, health_issues: Sequence[HealthIssue],
+                quality_reasons: Sequence[str]) -> str:
+    if system_state in ("IDLE", "FAULT"):  # the current state wins over the last frame's reason
+        return state_reason(system_state, health_issues)
+    if reason == "INPUT_QUALITY":
+        first = quality_reasons[0] if quality_reasons else ""
+        return "Imagem recusada pela porta de qualidade" + (f": {first}" if first else "")
+    if reason in STATE_REASONS:
+        return state_reason(system_state, health_issues)
+    return DECISION_REASON_PT.get(reason or "", reason or "")
+
+
+def verdict_view(result: str | None, reason: str | None, *, system_state: str = "OBSERVING",
+                 health_issues: Sequence[HealthIssue] = (), quality_reasons: Sequence[str] = ()
+                 ) -> dict[str, Any]:
     """The REAL system verdict, filtered: never PASS/DEFECT (shown as NÃO EXIBIDO)."""
     if result is None:
-        return {"value": NO_DECISION, "modifier": "none", "phrase": VERDICT_PHRASE,
-                "reason": "aguardando o primeiro quadro", "hidden": False}
+        waiting = (state_reason(system_state, health_issues) if system_state in ("IDLE", "FAULT")
+                   else "Aguardando o primeiro quadro")
+        return {"value": NO_DECISION, "modifier": "none", "phrase": VERDICT_PHRASE, "reason": waiting,
+                "hidden": False}
     if result not in DISPLAYABLE_VERDICTS:
         return {"value": HIDDEN_VERDICT, "modifier": "none",
                 "phrase": "Resultado conclusivo não exibido: esta ferramenta não está aprovada para isso.",
                 "reason": "", "hidden": True}
     return {"value": result, "modifier": "review" if result == REVIEW else "none", "phrase": VERDICT_PHRASE,
-            "reason": DECISION_REASON_PT.get(reason or "", reason or ""), "hidden": False}
+            "reason": reason_text(reason, system_state, health_issues, quality_reasons), "hidden": False}
 
 
 # -- quality gate ---------------------------------------------------------------------------
@@ -117,15 +200,27 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
 
     sharp_hi = q.min_sharpness * 4
     bright_frac, dark_frac = m("bright_fraction"), m("dark_fraction")
-    rotation = m("object_rotation_abs_deg")
     outside = m("object_outside_roi_px")
     found = m("object_area_fraction_roi") >= q.min_object_fraction
+    # Position = displacement of the piece relative to the template, in px (limit from the gate: 0 px).
     if not found:
-        position_detail = "peça não encontrada no gabarito"
-    elif m("object_rotation_measured") < 1:
-        position_detail = "rotação não medida (contorno pouco retangular)"
+        position_value, position_text, position_detail = math.nan, "—", "peça não encontrada no gabarito"
     else:
-        position_detail = "dentro da área do gabarito" if outside <= 0 else f"{fmt(outside, 0)} px fora da área"
+        position_value, position_text = max(0.0, outside), f"{fmt(max(0.0, outside), 0)} px"
+        position_detail = ("dentro do gabarito" if outside <= OUTSIDE_LIMIT_PX
+                           else "peça deslocada para fora do gabarito")
+    # Product rotation: only shown when it was really measured on a piece fully inside the template.
+    if not found:
+        rotation_value, rotation_text, rotation_detail = math.nan, "—", "não medida: peça não encontrada"
+    elif outside > OUTSIDE_LIMIT_PX:
+        rotation_value, rotation_text, rotation_detail = math.nan, "—", "não avaliada: peça fora do gabarito"
+    elif m("object_rotation_measured") < 1:
+        rotation_value, rotation_text, rotation_detail = math.nan, "—", "não medida: contorno pouco retangular"
+    else:
+        rotation_value = m("object_rotation_abs_deg")
+        rotation_text = f"{fmt(m('object_rotation_deg'))}°"
+        rotation_detail = f"limite {fmt_limit(q.max_object_rotation_deg)}°"
+    position_hi = max(POSITION_SCALE_PX, OUTSIDE_LIMIT_PX * 2)
     bars = [
         limit_bar("Nitidez", m("sharpness_laplacian_var"), fmt(m("sharpness_laplacian_var"), 0),
                   scale=(0, sharp_hi), thresholds=[q.min_sharpness], band=(q.min_sharpness, sharp_hi),
@@ -140,12 +235,16 @@ def quality_view(quality: Mapping[str, Any] | None, q: QualityConfig) -> dict[st
                   band=(0, q.max_bright_fraction * 100),
                   attention=bool(failing & {"bright_fraction", "dark_fraction", "specular_fraction_roi"}),
                   scale_text=("0 %", f"{fmt(q.max_bright_fraction * 200, 0)} %"),
-                  detail=f"áreas estouradas; sombras saturadas {fmt(dark_frac * 100)} %"),
-        limit_bar("Posição", rotation, f"{fmt(rotation)}°", scale=(0, q.max_object_rotation_deg * 2),
+                  detail=f"limite {fmt_limit(q.max_bright_fraction * 100)} % · sombras {fmt(dark_frac * 100)} %"),
+        limit_bar("Posição", position_value, position_text, scale=(0, position_hi),
+                  thresholds=[OUTSIDE_LIMIT_PX], band=(0, OUTSIDE_LIMIT_PX),
+                  attention=bool(failing & {"object_outside_roi_px", "object_area_fraction_roi"}),
+                  scale_text=("0 px", f"{fmt(position_hi, 0)}+ px"),
+                  detail=f"limite {fmt_limit(OUTSIDE_LIMIT_PX)} px · {position_detail}"),
+        limit_bar("Rotação do produto", rotation_value, rotation_text, scale=(0, q.max_object_rotation_deg * 2),
                   thresholds=[q.max_object_rotation_deg], band=(0, q.max_object_rotation_deg),
-                  attention=bool(failing & {"object_rotation_abs_deg", "object_outside_roi_px",
-                                            "object_area_fraction_roi"}),
-                  scale_text=("0°", f"{fmt(q.max_object_rotation_deg * 2, 0)}°"), detail=position_detail),
+                  attention="object_rotation_abs_deg" in failing,
+                  scale_text=("0°", f"{fmt(q.max_object_rotation_deg * 2, 0)}°"), detail=rotation_detail),
     ]
     status = str(quality.get("status", "—"))
     return {"status": status, "valid": status == "VALID", "reasons": reasons, "bars": bars}
@@ -173,17 +272,37 @@ def shadow_view(stages: Sequence[Mapping[str, Any]] | None, quality_valid: bool 
     if status != "OK" or not preds:
         return {**base, "text": f"Sem medição ({status or 'sem resultado'})."}
     attrs: Mapping[str, Any] = preds[0].get("attributes") or {}
-    tol = float(attrs.get("tolerance_deg", 5.0))
-    low = float(attrs.get("borderline_low_deg", 3.0))
-    angle = float(attrs.get("angle_deg", float("nan")))
-    abs_angle = abs(angle)
-    inclined = str(preds[0].get("class_id")) != "OK"
-    neutral = (f"Sugestão da prévia: etiqueta inclinada (acima de {fmt(tol, 0)}°)" if inclined
-               else f"Sugestão da prévia: etiqueta alinhada (até {fmt(tol, 0)}°)")
-    bar = limit_bar("Ângulo da etiqueta", abs_angle, f"{fmt(angle)}°", scale=(0, tol * 2), thresholds=[tol],
-                    band=(low, tol), attention=abs_angle >= low, scale_text=("0°", f"{fmt(tol * 2, 0)}°"),
-                    detail=f"faixa limite {fmt(low, 0)}–{fmt(tol, 0)}°")
-    return {**base, "bar": bar, "text": neutral, "angle_text": f"{fmt(angle)}°"}
+    tol, low, angle = _num(attrs.get("tolerance_deg"), 5.0), _num(attrs.get("borderline_low_deg"), 3.0), \
+        _num(attrs.get("angle_deg"), math.nan)
+    if not math.isfinite(angle):
+        return {**base, "text": "Sem medição (ângulo ausente)."}
+    angle = round(angle, 1)  # classify the value the operator SEES (review 003, M2): "3,0°" is never "alinhada"
+    category = shadow_category(abs(angle), low, tol)
+    bar = limit_bar("Ângulo da etiqueta", abs(angle), f"{fmt(angle)}°", scale=(0, tol * 2), thresholds=[tol],
+                    band=(low, tol), attention=SHADOW_TONE[category] == "review",
+                    scale_text=("0°", f"{fmt_limit(tol * 2)}°"),
+                    detail=f"faixa limite {fmt_limit(low)}–{fmt_limit(tol)}°")
+    return {**base, "bar": bar, "text": shadow_text(category, low, tol), "angle_text": f"{fmt(angle)}°",
+            "category": category, "tone": SHADOW_TONE[category]}
+
+
+# The text and the marker colour come from ONE category (owner review 19/11/2026): they always agree.
+SHADOW_TONE = {"aligned": "neutral", "limit": "review", "inclined": "review"}
+
+
+def shadow_category(abs_angle: float, low: float, tol: float) -> str:
+    """Same boundaries as the specialist: > tol inclined; low..tol borderline; < low aligned."""
+    if abs_angle > tol:
+        return "inclined"
+    return "limit" if abs_angle >= low else "aligned"
+
+
+def shadow_text(category: str, low: float, tol: float) -> str:
+    if category == "inclined":
+        return "Etiqueta inclinada"
+    if category == "limit":
+        return f"Caso limite ({fmt_limit(low)}–{fmt_limit(tol)}°)"
+    return "Etiqueta alinhada"
 
 
 # -- cascade trail ---------------------------------------------------------------------------
@@ -214,11 +333,14 @@ _STATE_DOT = {"OBSERVING": "ok", "DEGRADED": "review", "FAULT": "fault"}
 
 
 def banner_view(system_state: str, camera_status: str, problem: str | None, problem_code: str | None,
-                frames_processed: int = 0) -> dict[str, str] | None:
+                frames_processed: int = 0, simulated: bool = False) -> dict[str, str] | None:
+    help_text = RESET_HELP_SIMULATED if simulated else RESET_HELP
     if system_state == "FAULT":
         camera = camera_status == "FAULT" or (problem_code == "AEX-CAP-001")
-        return {"title": "Câmera desconectada — inspeção parada" if camera else "Falha travada — inspeção parada",
-                "text": RESET_HELP if camera else f"{problem or 'Falha travada.'} {RESET_HELP}",
+        title = ("Fonte simulada interrompida — inspeção parada" if simulated and camera
+                 else "Câmera desconectada — inspeção parada" if camera else "Falha travada — inspeção parada")
+        return {"title": title,
+                "text": help_text if camera else f"{problem or 'Falha travada.'} {help_text}",
                 "code": "AEX-CAP-001" if camera else (problem_code or "AEX-STATE-002")}
     if problem:
         title = "Inspeção interrompida" if frames_processed > 0 else "Inspeção não iniciada"
@@ -246,12 +368,14 @@ def build_status(*, system_state: str, camera_status: str, latency_p95_ms: float
                  fps: float | None, ram_free_gb: float | None, quality_config: QualityConfig,
                  result: str | None, reason: str | None, detail: Mapping[str, Any] | None,
                  frame_size: tuple[int, int] | None, problem: str | None, problem_code: str | None,
-                 frames_processed: int, running: bool, image_stale: bool = False) -> dict[str, Any]:
+                 frames_processed: int, running: bool, image_stale: bool = False,
+                 simulated: bool = False, health_issues: Sequence[HealthIssue] = ()) -> dict[str, Any]:
     q = quality_config
     quality_raw: Mapping[str, Any] | None = (detail or {}).get("quality")
     quality = quality_view(quality_raw, q)
     shadow = shadow_view((detail or {}).get("stages"), quality["valid"])
-    verdict = verdict_view(result, reason)
+    verdict = verdict_view(result, reason, system_state=system_state, health_issues=health_issues,
+                           quality_reasons=quality["reasons"])
     roi = {"x": q.roi_x * 100, "y": q.roi_y * 100, "w": q.roi_w * 100, "h": q.roi_h * 100}
     if quality_raw and frame_size and frame_size[0] > 0 and frame_size[1] > 0:
         rx, ry, rw, rh = (float(v) for v in quality_raw.get("roi_px") or (0, 0, 0, 0))
@@ -259,18 +383,22 @@ def build_status(*, system_state: str, camera_status: str, latency_p95_ms: float
             w, h = frame_size
             roi = {"x": rx / w * 100, "y": ry / h * 100, "w": rw / w * 100, "h": rh / h * 100}
     out: dict[str, Any] = scrub({
-        "tool": "bench-view", "tool_notice": TOOL_NOTICE, "privacy_notice": PRIVACY_NOTICE,
+        "tool": "bench-view", "tool_name": TOOL_NAME, "tool_caption": TOOL_CAPTION, "tool_notice": TOOL_NOTICE,
+        "privacy_notice": PRIVACY_NOTICE_SIMULATED if simulated else PRIVACY_NOTICE,
         "mode": "OBSERVATION_ONLY", "running": running, "frames_processed": frames_processed,
+        "source": ({"kind": "SIMULATED", "simulated": True, "notice": SIMULATED_NOTICE} if simulated
+                   else {"kind": "CAMERA", "simulated": False, "notice": ""}),
         "image_note": ("Imagem congelada: último quadro antes da interrupção." if image_stale else ""),
         "strip": {
-            "camera": camera_status, "camera_dot": {"OK": "ok", "FAULT": "fault"}.get(camera_status, "idle"),
+            "camera": f"{camera_status} (simulada)" if simulated else camera_status,
+            "camera_dot": {"OK": "ok", "FAULT": "fault"}.get(camera_status, "idle"),
             "system": system_state, "system_dot": _STATE_DOT.get(system_state, "idle"),
             "latency_text": f"{fmt(latency_p95_ms, 0)} ms" if latency_p95_ms is not None else "—",
             "fps_text": fmt(fps) if fps is not None else "—",
             "ram_text": f"{fmt(ram_free_gb, 2)} GB" if ram_free_gb is not None else "—",
             "envelope_text": f"{q.version} · {'provisório' if q.status != 'validated' else 'validado'}",
         },
-        "banner": banner_view(system_state, camera_status, problem, problem_code, frames_processed),
+        "banner": banner_view(system_state, camera_status, problem, problem_code, frames_processed, simulated),
         "verdict": verdict, "quality": quality, "shadow": shadow,
         "trail": trail_view(quality, shadow, verdict),
         "roi_pct": {k: round(v, 2) for k, v in roi.items()},

@@ -64,6 +64,7 @@ class BenchViewEngine:
         if app.capture is None:
             raise ValueError("the bench viewer needs an application with a capture source")
         self.app, self.stage = app, stage
+        self.simulated = getattr(app.capture.source, "simulated", False) is True  # demo scene (no camera)
         self.interval = 1.0 / fps
         self.stream_width = stream_width
         self._clock = clock
@@ -198,11 +199,15 @@ class BenchViewEngine:
             if times and self._clock() - times[-1] > 2.0:
                 fps = 0.0  # nothing processed recently (stopped, refused or lost)
             mem = host_memory()
+            report = self.app.last_health
+            issues = ([(e.name, e.status.value, e.code.value if e.code else "") for e in report.all_entries
+                       if e.status.value not in ("OK", "DISABLED")] if report is not None else [])
             return build_status(
+                health_issues=issues,
                 system_state=self.app.state.state.value, camera_status=health[0].value,
                 latency_p95_ms=p95(latencies), fps=fps,
                 ram_free_gb=mem["available_gb"] if mem else None, quality_config=self.app.config.quality,
-                image_stale=self._jpeg is not None and not self.running,
+                image_stale=self._jpeg is not None and not self.running, simulated=self.simulated,
                 result=self._result, reason=self._reason, detail=self._detail, frame_size=self._frame_size,
                 problem=self.problem, problem_code=self.problem_code, frames_processed=self.frames_processed,
                 running=self.running)

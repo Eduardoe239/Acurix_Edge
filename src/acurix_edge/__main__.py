@@ -27,6 +27,10 @@ Exit codes (camera-profile): 0 profile measured, 2 camera unavailable or invalid
 
 Bench viewer (AEX-BENCH-VIEW-001, DEVELOPMENT TOOL, not the 0.5.0 console):
   python -m acurix_edge bench-view --config FILE [--device N] [--port P] [--fps F] [--stream-width W]
+  python -m acurix_edge bench-view --demo-sintetico [--fps F] [--port P] [--config FILE] [--base-dir DIR]
+--demo-sintetico: SIMULATED source (image generated in code), never opens a camera, needs no camera
+profile, page shows a fixed "FONTE SIMULADA" banner, events record input_source.simulated=true;
+data in a temporary folder deleted at exit unless --base-dir is given.
 Listens ONLY on 127.0.0.1; never writes images; never shows PASS/DEFECT. Stop: page button or Ctrl+C.
 Exit codes (bench-view): 0 stopped cleanly, 2 refused (configuration, camera profile missing, port busy).
 """
@@ -135,12 +139,17 @@ def _add_capture_parsers(sub: Any) -> None:
     p.add_argument("--device", type=int, required=True, help="webcam index")
     p.add_argument("--device-label", required=True, help="real camera name, stored in the profile")
     b = sub.add_parser("bench-view", help="DEVELOPMENT TOOL: local live page (127.0.0.1) of the real engine")
-    b.add_argument("--config", type=Path, required=True, help="configuration with the expected camera profile")
-    b.add_argument("--device", type=int, default=0, help="webcam index")
+    b.add_argument("--config", type=Path, default=None,
+                   help="configuration with the expected camera profile (optional with --demo-sintetico)")
+    b.add_argument("--demo-sintetico", action="store_true",
+                   help="SIMULATED source: image generated in code; never opens a camera; no camera profile; "
+                        "data in a temporary folder deleted at exit (unless --base-dir)")
+    b.add_argument("--device", type=int, default=None, help="webcam index (default 0; not with --demo-sintetico)")
     b.add_argument("--port", type=int, default=None, help="local port (default: api.port of the config, 8765)")
     b.add_argument("--fps", type=float, default=8.0, help="processed/displayed frames per second (1..15)")
     b.add_argument("--stream-width", type=int, default=640, help="width of the live image (160..1280 px)")
-    b.add_argument("--base-dir", type=Path, default=Path.cwd())
+    b.add_argument("--base-dir", type=Path, default=None,
+                   help="data folder (default: current folder; with --demo-sintetico: a temporary folder)")
 
 
 def _capture(args: argparse.Namespace) -> int:
@@ -244,27 +253,59 @@ def _camera_profile(args: argparse.Namespace) -> int:
 
 def _bench_view(args: argparse.Namespace) -> int:
     """Bench viewer (AEX-BENCH-VIEW-001). Turns the real camera on: only with the owner's authorization."""
+    import shutil
+    import tempfile
+
     from acurix_edge.benchview.app_factory import BenchViewError, build_bench_view
 
     configure_logging("WARNING")
+    demo = bool(args.demo_sintetico)
+    if demo and args.device is not None:
+        print(json.dumps({"error": "BENCH_VIEW_REFUSED", "problems": [
+            "--device não se aplica ao --demo-sintetico (nenhuma câmera é aberta)"]}, ensure_ascii=False),
+            file=sys.stderr)
+        return 2
+    temp_dir: Path | None = None
+    if args.base_dir is not None:
+        base_dir = args.base_dir.resolve()
+    elif demo:  # disposable by default (owner, 19/11/2026): never mixed with a real station's data
+        base_dir = temp_dir = Path(tempfile.mkdtemp(prefix="acurix-demo-sintetico-"))
+    else:
+        base_dir = Path.cwd().resolve()
     try:
-        server = build_bench_view(config_path=args.config, base_dir=args.base_dir.resolve(), device=args.device,
-                                  port=args.port, fps=args.fps, stream_width=args.stream_width)
+        server = build_bench_view(config_path=args.config, base_dir=base_dir,
+                                  device=0 if args.device is None else args.device, port=args.port, fps=args.fps,
+                                  stream_width=args.stream_width, synthetic=demo)
     except BenchViewError as exc:
         print(json.dumps({"error": "BENCH_VIEW_REFUSED", "problems": exc.problems}, ensure_ascii=False),
               file=sys.stderr)
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         return 2
+    except BaseException:  # unexpected failure or Ctrl+C while building: the disposable folder goes too
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
     try:  # start() opens the camera: Ctrl+C during it must still release everything (review B1)
         started = server.engine.start()
-        print(json.dumps({"url": server.url, "session_started": started, "problem": server.engine.problem,
-                          "stop": "botão Encerrar na página ou Ctrl+C"}, ensure_ascii=False), flush=True)
+        info: dict[str, object] = {"url": server.url, "session_started": started, "problem": server.engine.problem,
+                                   "stop": "botão Encerrar na página ou Ctrl+C", "data_dir": str(base_dir)}
+        if demo:
+            info["source"] = "FONTE SIMULADA — imagem gerada por código, não é câmera real"
+            info["data_dir_disposable"] = temp_dir is not None
+        print(json.dumps(info, ensure_ascii=False), flush=True)
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
         server.engine.stop()  # ends the session and releases the camera (idempotent)
         server.server_close()
-    print(json.dumps({"stopped": True, "frames_processed": server.engine.frames_processed}), flush=True)
+    removed = None
+    if temp_dir is not None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        removed = not temp_dir.exists()
+    print(json.dumps({"stopped": True, "frames_processed": server.engine.frames_processed,
+                      "disposable_data_removed": removed}), flush=True)
     return 0
 
 

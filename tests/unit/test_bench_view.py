@@ -119,7 +119,8 @@ class ServerTests(BenchViewCase):
         self.assertEqual(s["quality"]["status"], "INPUT_INVALID")
         self.assertTrue(s["quality"]["reasons"])
         self.assertTrue(all(r in vm.QUALITY_REASON_PT.values() for r in s["quality"]["reasons"]))
-        self.assertEqual([b["label"] for b in s["quality"]["bars"]], ["Nitidez", "Brilho", "Saturação", "Posição"])
+        self.assertEqual([b["label"] for b in s["quality"]["bars"]],
+                         ["Nitidez", "Brilho", "Saturação", "Posição", "Rotação do produto"])
         self.assertIn("recusada", s["shadow"]["text"])  # the specialist is not called on a refused image
         self.assertEqual(s["trail"][0]["kind"], "warn")
         self.assertEqual([t["detail"] for t in s["trail"][1:3]], ["não implementada", "não implementada"])
@@ -364,19 +365,140 @@ class ViewModelTests(unittest.TestCase):
     def test_shadow_preview_is_neutral_and_labelled(self):
         s = vm.shadow_view(self.shadow_stage("LABEL_SKEWED", -7.5), True)
         self.assertEqual(s["title"], "Prévia (modo sombra) — não decide")
-        self.assertEqual(s["text"], "Sugestão da prévia: etiqueta inclinada (acima de 5°)")
+        self.assertEqual(s["text"], "Etiqueta inclinada")
         self.assertEqual(s["angle_text"], "-7,5°")
         self.assertEqual(s["bar"]["band_pct"], [30.0, 50.0])  # 3–5° on a 0–10° scale
         self.assertEqual(s["bar"]["thresholds_pct"], [50.0])
         self.assertTrue(s["bar"]["attention"])
         ok = vm.shadow_view(self.shadow_stage("OK", 1.2), True)
-        self.assertEqual(ok["text"], "Sugestão da prévia: etiqueta alinhada (até 5°)")
+        self.assertEqual(ok["text"], "Etiqueta alinhada")
         self.assertFalse(ok["bar"]["attention"])
+
+    def test_shadow_text_always_matches_the_marker_colour(self):  # owner review 19/11/2026, item 1
+        expected = {2.9: ("Etiqueta alinhada", False), 3.0: ("Caso limite (3–5°)", True),
+                    4.2: ("Caso limite (3–5°)", True), 5.0: ("Caso limite (3–5°)", True),
+                    5.1: ("Etiqueta inclinada", True), 0.0: ("Etiqueta alinhada", False)}
+        for angle, (text, attention) in expected.items():
+            for sign in (1, -1):
+                with self.subTest(angle=sign * angle):
+                    cls = "LABEL_SKEWED" if angle > 5 else "OK"
+                    s = vm.shadow_view(self.shadow_stage(cls, sign * angle), True)
+                    self.assertEqual(s["text"], text)
+                    self.assertEqual(s["bar"]["attention"], attention)
+                    self.assertEqual(s["tone"] == "review", attention, "text tone == marker colour")
+        for tenth in range(0, 101):  # property: every angle 0..10° in 0,1° steps
+            s = vm.shadow_view(self.shadow_stage("OK", tenth / 10), True)
+            self.assertEqual(s["bar"]["attention"], s["text"] != "Etiqueta alinhada")
+            self.assertNotEqual(s["text"] == "Etiqueta alinhada", tenth >= 30)
         inconclusive = vm.shadow_view([{"shadow": True, "result": {"status": "INCONCLUSIVE",
                                                                     "error_code": "LABEL_NOT_FOUND"}}], True)
         self.assertEqual(inconclusive["text"], "Inconclusiva: etiqueta não encontrada.")
         self.assertIsNone(inconclusive["bar"])
         self.assertIn("recusada", vm.shadow_view(None, False)["text"])
+
+    def quality(self, status, metrics, reasons=()):
+        return vm.quality_view({"status": status, "metrics": metrics,
+                                "reasons": [{"code": c, "metric": m} for c, m in reasons]}, self.Q)
+
+    def bar(self, view, label):
+        return next(b for b in view["bars"] if b["label"] == label)
+
+    def test_position_is_displacement_in_px_and_rotation_is_separate(self):  # item 2
+        shifted = self.quality("INPUT_INVALID", {
+            "object_area_fraction_roi": 0.4, "object_outside_roi_px": 166.0, "object_rotation_measured": 1.0,
+            "object_rotation_deg": 0.0, "object_rotation_abs_deg": 0.0},
+            reasons=[("OBJECT_OUTSIDE_ROI", "object_outside_roi_px")])
+        pos, rot = self.bar(shifted, "Posição"), self.bar(shifted, "Rotação do produto")
+        self.assertEqual(pos["value_text"], "166 px")
+        self.assertTrue(pos["attention"])
+        self.assertEqual(pos["detail"], "limite 0 px · peça deslocada para fora do gabarito")
+        self.assertEqual(pos["scale_text"], ["0 px", "100+ px"])
+        self.assertEqual(rot["value_text"], "—", "never 0,0° when the refusal is a displacement")
+        self.assertIsNone(rot["value_pct"], "no marker for a value that was not evaluated")
+        self.assertIn("peça fora do gabarito", rot["detail"])
+        self.assertNotIn("0,0°", json.dumps(shifted, ensure_ascii=False))
+        inside = self.quality("VALID", {
+            "object_area_fraction_roi": 0.4, "object_outside_roi_px": 0.0, "object_rotation_measured": 1.0,
+            "object_rotation_deg": -2.4, "object_rotation_abs_deg": 2.4})
+        self.assertEqual(self.bar(inside, "Posição")["value_text"], "0 px")
+        self.assertEqual(self.bar(inside, "Posição")["detail"], "limite 0 px · dentro do gabarito")
+        self.assertEqual(self.bar(inside, "Rotação do produto")["value_text"], "-2,4°")
+        self.assertEqual(self.bar(inside, "Rotação do produto")["detail"], "limite 10°")
+        missing = self.quality("INPUT_INVALID", {"object_area_fraction_roi": 0.0},
+                               reasons=[("OBJECT_NOT_FOUND", "object_area_fraction_roi")])
+        for label in ("Posição", "Rotação do produto"):
+            with self.subTest(label=label):
+                self.assertEqual(self.bar(missing, label)["value_text"], "—")
+                self.assertIsNone(self.bar(missing, label)["value_pct"])
+
+    def test_saturation_caption_uses_real_values(self):  # item 6
+        v = self.quality("VALID", {"bright_fraction": 0.032, "dark_fraction": 0.0})
+        sat = self.bar(v, "Saturação")
+        self.assertEqual(sat["detail"], f"limite {vm.fmt(self.Q.max_bright_fraction * 100, 0)} % · sombras 0,0 %")
+        self.assertEqual(sat["value_text"], "3,2 %")
+
+    def test_no_decision_reason_tells_the_real_cause(self):  # item 3
+        degraded = [("models", "DEGRADED", ""), ("memory", "DEGRADED", "AEX-CAS-004"),
+                    ("decision_rule", "DEGRADED", "")]
+        cases = [
+            (("NO_DECISION", "SYSTEM_NOT_OBSERVING", "DEGRADED", degraded, ()),
+             "Sistema em DEGRADED: nenhum modelo aprovado; RAM livre abaixo de 1,5 GB; "
+             "nenhuma regra de decisão aprovada"),
+            (("NO_DECISION", "HEALTH_NOT_OK", "DEGRADED", [("gpu", "DEGRADED", "")], ()),
+             "Sistema em DEGRADED: placa de vídeo: DEGRADED"),
+            (("NO_DECISION", "SYSTEM_NOT_OBSERVING", "DEGRADED", [("weird_entry", "UNKNOWN", "")], ()),
+             "Sistema em DEGRADED: weird_entry: não medido"),
+            (("NO_DECISION", "SYSTEM_NOT_OBSERVING", "OBSERVING", (), ()), "Aguardando o próximo quadro"),
+            (("NO_DECISION", "INPUT_QUALITY", "DEGRADED", degraded, ("Peça fora da área do gabarito",)),
+             "Imagem recusada pela porta de qualidade: Peça fora da área do gabarito"),
+            (("NO_DECISION", "INFERENCE_NOT_OK", "OBSERVING", (), ()),
+             "Especialista em validação: nenhum modelo aprovado para decidir"),
+            (("NO_DECISION", "SYSTEM_NOT_OBSERVING", "IDLE", degraded, ()), "Sessão de inspeção não iniciada"),
+            (("NO_DECISION", "INPUT_QUALITY", "FAULT", degraded, ("x",)), "Sistema em FAULT: inspeção parada"),
+            ((None, None, "IDLE", (), ()), "Sessão de inspeção não iniciada"),
+            ((None, None, "OBSERVING", (), ()), "Aguardando o primeiro quadro"),
+        ]
+        for (result, reason, state, issues, q_reasons), text in cases:
+            with self.subTest(reason=reason, state=state):
+                v = vm.verdict_view(result, reason, system_state=state, health_issues=issues,
+                                    quality_reasons=q_reasons)
+                self.assertEqual(v["reason"], text)
+                self.assertNotIn("fora de observação", v["reason"])
+
+    def test_health_phrase_never_states_a_cause_the_status_does_not_support(self):  # review 003, M1
+        cases = {
+            ("memory", "UNKNOWN", ""): "RAM livre: não medido",           # not "abaixo de 1,5 GB"
+            ("memory", "DEGRADED", "AEX-CAS-004"): "RAM livre abaixo de 1,5 GB",
+            ("cpu", "UNKNOWN", ""): "processador: não medido",            # never "sobrecarregado"
+            ("quality_envelope", "DEGRADED", "AEX-SYS-001"): "porta de qualidade com erros seguidos",
+            ("quality_envelope", "DEGRADED", "AEX-CFG-001"): "envelope de qualidade recusado",
+            ("camera", "FAULT", "AEX-CAP-001"): "câmera: FAULT",
+            ("models", "DEGRADED", "AEX-CFG-002"): "modelo carregado fora da lista aprovada",
+        }
+        for issue, text in cases.items():
+            with self.subTest(issue=issue):
+                self.assertEqual(vm.health_phrase(issue), text)
+
+    def test_preview_classifies_the_value_shown(self):  # review 003, M2
+        for angle, shown, text in ((2.96, "3,0°", "Caso limite (3–5°)"), (2.94, "2,9°", "Etiqueta alinhada"),
+                                   (4.96, "5,0°", "Caso limite (3–5°)"), (5.04, "5,0°", "Caso limite (3–5°)"),
+                                   (5.06, "5,1°", "Etiqueta inclinada"), (-2.96, "-3,0°", "Caso limite (3–5°)")):
+            with self.subTest(angle=angle):
+                s = vm.shadow_view(self.shadow_stage("OK", angle), True)
+                self.assertEqual((s["angle_text"], s["text"]), (shown, text))
+                self.assertEqual(s["bar"]["value_text"], shown)
+
+    def test_limits_keep_their_decimals_and_bad_attributes_do_not_break(self):  # review 003, B5 + hypothesis
+        q = QualityConfig(max_object_rotation_deg=0.5, max_bright_fraction=0.155)
+        v = vm.quality_view({"status": "VALID", "reasons": [], "metrics": {
+            "object_area_fraction_roi": 0.5, "object_outside_roi_px": 0.0, "object_rotation_measured": 1.0,
+            "object_rotation_deg": 0.2, "object_rotation_abs_deg": 0.2, "bright_fraction": 0.0,
+            "dark_fraction": 0.0}}, q)
+        self.assertEqual(self.bar(v, "Rotação do produto")["detail"], "limite 0,5°")
+        self.assertTrue(self.bar(v, "Saturação")["detail"].startswith("limite 15,5 %"))
+        s = vm.shadow_view([{"shadow": True, "result": {"status": "OK", "predictions": [
+            {"class_id": "OK", "attributes": {"angle_deg": 1.0, "tolerance_deg": None}}]}}], True)
+        self.assertEqual(s["text"], "Etiqueta alinhada")  # missing tolerance -> default, no exception
 
     def test_roi_and_trail(self):
         s = self.full("NO_DECISION", self.shadow_stage("OK", 0.5))
@@ -430,8 +552,41 @@ class StaticAssetTests(unittest.TestCase):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("style=", html)
         self.assertIsNone(re.search(r"<script>(?!</script>)", html), "no inline script (CSP)")
-        self.assertIn("Câmera apontada só para a bancada. Nenhuma imagem é gravada.", html)
+        self.assertIn("<!--PRIVACY-NOTICE-->", html)  # filled by the server per mode (see ServedPageTests)
         self.assertIn("Luís Eduardo de Sousa Barbosa", html)
+
+    def test_identification_at_the_start_of_the_status_strip(self):  # item 4
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        strip = html[html.index('<header class="ax-strip"'):html.index("</header>")]
+        first = strip[strip.index("<span"):]
+        self.assertTrue(first.startswith('<span class="ax-strip__item bv-ident"><b>Acurix Edge · Visualizador '
+                                         'de bancada</b><span class="ax-limit__scale bv-caption">ferramenta de '
+                                         'desenvolvimento</span></span>'))
+        bundle = (STATIC_DIR / "bundle.css").read_text(encoding="utf-8")  # caption = 12/16, text-muted
+        self.assertRegex(bundle, r"\.ax-limit__scale\s*\{[^}]*color:\s*var\(--text-muted\)")
+
+
+class ServedPageTests(unittest.TestCase):
+    """The privacy notice is written by the server, right below the image, per mode (item 5)."""
+
+    def privacy(self, simulated):
+        from acurix_edge.benchview.server import load_static
+
+        page = load_static(simulated=simulated)["/"][0].decode("utf-8")
+        self.assertNotIn("<!--PRIVACY-NOTICE-->", page)
+        found = re.findall(r'<p class="ax-card bv-privacy" role="note">([^<]+)</p>', page)
+        self.assertEqual(len(found), 1, "exactly one privacy notice")
+        left = page[page.index('<section class="bv-left"'):page.index("</section>")]
+        self.assertLess(left.index('id="media"'), left.index("bv-privacy"), "directly below the image")
+        footer = page[page.index("<footer"):]
+        self.assertNotIn("Nenhuma imagem é gravada", footer, "not hidden at the bottom anymore")
+        return found[0]
+
+    def test_real_mode_notice(self):
+        self.assertEqual(self.privacy(False), "Câmera apontada só para a bancada. Nenhuma imagem é gravada.")
+
+    def test_demo_mode_notice(self):
+        self.assertEqual(self.privacy(True), "Fonte simulada: nenhuma câmera em uso. Nenhuma imagem é gravada.")
 
     @unittest.skipUnless(DS_DIR.is_dir(), "design-system source folder not present (not versioned)")
     def test_design_system_copies_are_identical(self):

@@ -360,6 +360,11 @@ class Application:
                 raise SessionError("no active session", ErrorCode.SES_003)
         return self.capture.next_frame(session_id, timeout)
 
+    @property
+    def last_health(self) -> HealthReport | None:
+        """Last evaluated health report (read-only; never re-evaluates). For local display."""
+        return self._last_health
+
     def _evaluate_health(self) -> HealthReport:
         report = self.health.evaluate()
         self._last_health = report
@@ -635,9 +640,15 @@ class Application:
             input=InputDescriptor(frame.input.width, frame.input.height,
                                   ImageQuality.VALID if quality.is_valid else ImageQuality.INVALID),
             frame=frame.pixels)
+        source = self.capture.source if self.capture is not None else None
+        input_source: dict[str, Any] | None = None
+        if getattr(source, "simulated", False) is True:  # demo source: the EVENT says so (owner, 19/11/2026)
+            input_source = {"source_id": frame.source_id, "simulated": True,
+                            "notice": "SIMULATED SOURCE: image generated in code, not a real camera"}
         self.queue.enter()
         try:
-            return self._process(request, captured_at_utc=frame.captured_at_utc, quality=quality, stage=stage)
+            return self._process(request, captured_at_utc=frame.captured_at_utc, quality=quality, stage=stage,
+                                 input_source=input_source)
         finally:
             self.queue.leave()
 
@@ -749,7 +760,8 @@ class Application:
                                     "(NOT validated: calibrate in the optical test, Anexo 04A 3.2)")
 
     def _process(self, request: InferenceRequest, *, captured_at_utc: str | None = None,
-                 quality: QualityResult | None = None, stage: InspectionStage | None = None) -> ProcessOutcome:
+                 quality: QualityResult | None = None, stage: InspectionStage | None = None,
+                 input_source: dict[str, Any] | None = None) -> ProcessOutcome:
         # R4-02: caller errors are rejected before any processing (no inference, no event, no result).
         if not isinstance(request, InferenceRequest):
             raise ContractError(f"request must be InferenceRequest, got {type(request).__name__}")
@@ -802,6 +814,8 @@ class Application:
                 started = time.perf_counter()
                 extra: dict[str, Any] = {}
                 forced: Decision | None = None
+                if input_source is not None:
+                    extra["input_source"] = dict(input_source)
                 if quality is not None:
                     extra["quality"] = quality.to_dict()
                 if quality is not None and not quality.is_valid:

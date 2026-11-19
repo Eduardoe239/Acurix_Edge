@@ -15,6 +15,7 @@ Security posture (no authentication, so LOCAL ONLY):
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import socket
@@ -24,6 +25,7 @@ from importlib import resources
 from typing import Any
 
 from acurix_edge.benchview.engine import BenchViewEngine
+from acurix_edge.benchview.view_model import PRIVACY_NOTICE, PRIVACY_NOTICE_SIMULATED, SIMULATED_NOTICE
 
 log = logging.getLogger("acurix_edge.benchview")
 
@@ -45,9 +47,30 @@ STATIC: dict[str, tuple[str, str]] = {  # URL path -> (file in static/, content 
 }
 
 
-def load_static() -> dict[str, tuple[bytes, str]]:
+BANNER_MARK = b"<!--SIMULATED-SOURCE-BANNER-->"
+TAG_MARK = b"<!--SIMULATED-SOURCE-TAG-->"
+PRIVACY_MARK = b"<!--PRIVACY-NOTICE-->"
+
+
+def load_static(simulated: bool = False) -> dict[str, tuple[bytes, str]]:
+    """Static files. With a SIMULATED source the page itself carries a fixed banner at the top and a
+    tag on the image, written here into the HTML (never toggled by JavaScript, cannot be hidden)."""
     root = resources.files("acurix_edge.benchview").joinpath("static")
-    return {path: (root.joinpath(name).read_bytes(), ctype) for path, (name, ctype) in STATIC.items()}
+    files = {path: (root.joinpath(name).read_bytes(), ctype) for path, (name, ctype) in STATIC.items()}
+    page, ctype = files["/"]
+    if BANNER_MARK not in page or TAG_MARK not in page or PRIVACY_MARK not in page:
+        raise RuntimeError("index.html lost the simulated-source / privacy markers")
+    privacy = html.escape(PRIVACY_NOTICE_SIMULATED if simulated else PRIVACY_NOTICE).encode("utf-8")
+    page = page.replace(PRIVACY_MARK, b'<p class="ax-card bv-privacy" role="note">' + privacy + b"</p>")
+    notice = html.escape(SIMULATED_NOTICE).encode("utf-8")
+    if simulated:
+        page = page.replace(BANNER_MARK, b'<div class="ax-banner ax-banner--p2 bv-simulated" role="note">'
+                            + notice + b"</div>")
+        page = page.replace(TAG_MARK, b'<div class="bv-sim-tag" aria-hidden="true">FONTE SIMULADA</div>')
+    else:
+        page = page.replace(BANNER_MARK, b"").replace(TAG_MARK, b"")
+    files["/"] = (page, ctype)
+    return files
 
 
 class BenchViewServer(ThreadingHTTPServer):
@@ -56,7 +79,7 @@ class BenchViewServer(ThreadingHTTPServer):
 
     def __init__(self, engine: BenchViewEngine, port: int) -> None:
         self.engine = engine
-        self.static = load_static()
+        self.static = load_static(simulated=engine.simulated)
         self.streams = threading.BoundedSemaphore(MAX_STREAMS)
         self._shutting_down = threading.Event()
         super().__init__((HOST, port), _Handler)

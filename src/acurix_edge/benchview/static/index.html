@@ -10,7 +10,9 @@
   <script src="/static/viewer.js" defer></script>
 </head>
 <body class="ax">
+  <!--SIMULATED-SOURCE-BANNER-->
   <header class="ax-strip" aria-label="Status do sistema">
+    <span class="ax-strip__item bv-ident"><b>Acurix Edge · Visualizador de bancada</b><span class="ax-limit__scale bv-caption">ferramenta de desenvolvimento</span></span>
     <span class="ax-strip__item"><span id="cam-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Câmera <b id="cam">—</b></span>
     <span class="ax-strip__item"><span id="sys-dot" class="ax-dot ax-dot--idle" aria-hidden="true"></span>Sistema <b id="sys">—</b></span>
     <span class="ax-strip__item">Latência p95 <b id="lat">—</b></span>
@@ -34,8 +36,10 @@
       <div id="media" class="bv-media">
         <img id="live" class="bv-live" src="/stream.mjpg" alt="Imagem ao vivo da bancada">
         <div id="roi" class="bv-roi" aria-hidden="true"></div>
+        <!--SIMULATED-SOURCE-TAG-->
       </div>
       <div id="refusal" class="bv-refusal bv-hidden" role="status"></div>
+      <!--PRIVACY-NOTICE-->
       <p id="image-note" class="bv-note"></p>
     </section>
 
@@ -66,7 +70,6 @@
   </main>
 
   <footer class="bv-footer">
-    <p class="bv-privacy">Câmera apontada só para a bancada. Nenhuma imagem é gravada.</p>
     <p>Ferramenta de desenvolvimento (AEX-BENCH-VIEW-001) — não é o console da release 0.5.0. Modo observação: nenhuma máquina é comandada.</p>
     <p>© 2026 Luís Eduardo de Sousa Barbosa. Fonte Inter: SIL Open Font License 1.1.</p>
   </footer>

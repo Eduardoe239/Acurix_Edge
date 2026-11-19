@@ -38,9 +38,11 @@
       th.style.left = t + "%";
       track.appendChild(th);
     }
-    const value = el("div", "ax-limit__value");
-    value.style.left = bar.value_pct + "%";
-    track.appendChild(value);
+    if (bar.value_pct !== null) {  // not measured: no marker (never a fake zero)
+      const value = el("div", "ax-limit__value");
+      value.style.left = bar.value_pct + "%";
+      track.appendChild(value);
+    }
     root.appendChild(track);
     const scale = el("div", "ax-limit__scale");
     scale.appendChild(el("span", null, bar.scale_text[0]));
@@ -107,7 +109,9 @@
 
     const sh = s.shadow;
     $("s-bar").replaceChildren(...(sh.bar ? [limitBar(sh.bar)] : []));
-    $("s-text").textContent = sh.text;
+    const sText = $("s-text");
+    sText.textContent = sh.text;
+    sText.className = "bv-note" + (sh.tone ? " bv-tone-" + sh.tone : "");  // same category as the marker
 
     $("trail").replaceChildren(...s.trail.map(trailStep));
     $("image-note").textContent = s.image_note;
